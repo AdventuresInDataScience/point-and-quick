@@ -1,0 +1,7 @@
+id: player
+name: ''
+speed: 120
+text_color: '#ffffff'
+animations: {}
+rules: []
+fallback: {}

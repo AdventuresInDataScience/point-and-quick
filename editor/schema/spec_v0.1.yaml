@@ -168,13 +168,21 @@ $defs:
           properties: {mask: {type: string}, baseline: {type: number}}
       music: {type: string}
       marks: {type: object, additionalProperties: {$ref: "#/$defs/xy"}}
-      hotspots:                            # object id -> its colour in the object mask
+      # The objects placed here, in draw order. Each one: its colour in the object mask (extra click
+      # area, and the only click area for things painted into the background), the mark the player
+      # walks to, where its sprite's top-left goes, which layer it's drawn in, and when it's here.
+      #   layer: back (behind characters: rugs, wall art), depth (sorted with characters by bottom
+      #          edge; the default), front (in front of everything). Within back and front, later in
+      #          this list is in front; within depth, list order breaks ties.
+      #   if:    the object is here (drawn and clickable) only while these hold
+      hotspots:
         type: object
         additionalProperties:
           type: object
           additionalProperties: false
           required: [color, mark]
-          properties: {color: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}, mark: {type: string}, pos: {$ref: "#/$defs/xy"}}
+          properties: {color: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}, mark: {type: string}, pos: {$ref: "#/$defs/xy"},
+                       layer: {enum: [back, depth, front]}, if: {$ref: "#/$defs/conds"}}
       exits:                               # map edge id -> the hotspot that triggers it
         type: object
         additionalProperties:

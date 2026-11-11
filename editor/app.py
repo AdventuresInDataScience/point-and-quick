@@ -1,16 +1,15 @@
 """Point & Click Maker — the Streamlit editor.   Run:  streamlit run editor/app.py
-Each page edits one part of the project dict (see spec.load). Edits save to disk automatically."""
+Each page edits one part of the project dict (see spec.load). Edits save to disk automatically,
+into the projects folder set on the Settings page (see config.py for where everything lives)."""
 import copy, os, re
 from pathlib import Path
 import pandas as pd, streamlit as st
 from PIL import Image, ImageDraw
 from streamlit_image_coordinates import streamlit_image_coordinates
-import ai, check, spec
+import ai, check, config, spec
 
 HERE = Path(__file__).parent
-# PNC_PROJECTS points the editor at another projects folder (the UI tests use a temporary one)
-PROJECTS, EXPORTS = Path(os.environ.get("PNC_PROJECTS", HERE / "projects")), HERE / "exports"
-PROJECTS.mkdir(exist_ok=True)
+PROJECTS = config.folder("projects")      # read each run, so a change on the Settings page takes effect at once
 st.set_page_config("Point & Click Maker", layout="wide")
 S = st.session_state
 for k, v in {"ver": 0, "undo": [], "dirty": False, "pts": [], "click": None}.items(): S.setdefault(k, v)
@@ -54,28 +53,95 @@ def table(rows, cols, key, /, **colcfg):
 # ---------------- sidebar: project ----------------
 
 def create():
-    gid = S.new_id.strip()
-    if re.fullmatch(r"[a-z][a-z0-9_]*", gid) and not (PROJECTS / gid).exists():
-        spec.new_project(PROJECTS / gid, gid); S.pick = gid
+    """Make a project from the name typed: the name becomes the title, and the folder gets an id
+    made from it ("My Game" -> my_game). Says why when it can't, and switches to the new project."""
+    name = S.new_name.strip(); gid = spec.make_id(name); where = config.folder("projects")
+    if not gid: S.create_msg = ("error", "Type a name for the game, using some letters or numbers."); return
+    if (where / gid).exists(): S.create_msg = ("error", f"There's already a project called '{gid}'."); return
+    spec.new_project(where / gid, gid, title=name)
+    S.pick, S.new_name = gid, ""          # the box empties only on success, so a bad name can be fixed
+    S.create_msg = ("success", f"Created '{name}' (in {where / gid}).")
 
 
+def copy_example(name):
+    gid = config.copy_example(name); S.pick = gid
+    S.create_msg = ("success", f"Copied the {name} example to {config.folder('projects') / gid}. Edit it as you like.")
+
+
+def set_folder(kind, default=False):
+    """Use the folder typed on the Settings page for projects, exports or models (or go back to the
+    default), creating it if need be."""
+    path = None if default else Path(S[f"set:{kind}"].strip()).expanduser()
+    try:
+        if path is not None and not path.is_absolute(): raise ValueError("give a full path, like C:\\Games or ~/Games")
+        if path is not None: path.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError) as e:
+        S.settings_msg = ("error", f"Can't use that folder: {e}"); return
+    config.update(**{kind: str(path) if path else None})
+    S[f"set:{kind}"] = config.settings()[kind]
+    if kind == "projects": S.pop("pick", None); S.loaded = None        # open a project from the new folder
+    S.settings_msg = ("success", f"{kind.capitalize()} now go in {config.settings()[kind]}.")
+
+
+def move_legacy():
+    moved = config.move_legacy(config.legacy_projects())
+    S.settings_msg = ("success", f"Moved {', '.join(moved)} to {config.folder('projects')}.")
+
+
+def settings_page():
+    st.header("Settings")
+    if not config.projects():
+        st.info(f"There are no games in your projects folder ({config.folder('projects')}) yet. Create one in the sidebar, "
+                "copy an example below, or choose a different projects folder.")
+    st.caption(f"Kept in `{config.settings_file()}`, so they stay the same wherever the editor is run from. Nothing is ever "
+               "saved inside the editor's own folder.")
+    s, d = config.settings(), config.defaults()
+    st.subheader("Folders")
+    what = {"projects": "Projects: where your games are kept", "exports": "Exports: where playable builds go",
+            "models": "AI models: downloaded models for the AI assets page"}
+    for kind in config.FOLDERS:
+        S.setdefault(f"set:{kind}", s[kind])
+        c = st.columns([6, 1, 1], vertical_alignment="bottom")
+        c[0].text_input(what[kind], key=f"set:{kind}")
+        c[1].button("Use this folder", key=f"use:{kind}", on_click=set_folder, args=(kind,), disabled=S[f"set:{kind}"].strip() == s[kind])
+        c[2].button("Default", key=f"def:{kind}", on_click=set_folder, args=(kind, True), disabled=s[kind] == d[kind], help=d[kind])
+    if os.environ.get("PNC_PROJECTS"): st.info(f"PNC_PROJECTS is set, so for now projects come from {os.environ['PNC_PROJECTS']}.")
+    if S.get("settings_msg"):
+        level, msg = S.pop("settings_msg"); (st.error if level == "error" else st.success)(msg)
+    legacy = config.legacy_projects()
+    if legacy:
+        st.subheader("Projects in the old location")
+        st.write(f"These are still in the editor's own folder ({config.LEGACY}), where projects used to be kept: "
+                 f"**{', '.join(legacy)}**. Move them into your projects folder to keep working on them.")
+        st.button("Move them to my projects folder", on_click=move_legacy, type="primary")
+    st.subheader("Examples")
+    st.caption("Games that come with the editor. Copying one makes a new project of your own; the example itself never changes.")
+    for name in config.examples():
+        st.button(f"Copy the {name} example", key=f"example:{name}", on_click=copy_example, args=(name,))
+
+
+PAGES = ["Game", "Map", "Locations", "Objects", "Characters", "Dialogue", "Strings", "Assets", "Assistant", "Check & export", "AI assets"]
 with st.sidebar:
     st.title("Point & Click Maker")
-    pick_project = st.selectbox("Project", sorted(p.name for p in PROJECTS.iterdir() if (p / "game.yaml").exists()), key="pick")
-    st.text_input("New project id", key="new_id", placeholder="lowercase_id")
-    st.button("Create project", on_click=create)
-if not pick_project: st.info("Create a project in the sidebar to start."); st.stop()
+    names = config.projects()
+    pick_project = st.selectbox("Project", names, key="pick") if names else None
+    with st.form("new_project", border=False):     # a form, so pressing Enter creates it too
+        st.text_input("New game", key="new_name", placeholder="My Game")
+        st.form_submit_button("Create project", on_click=create)
+    if S.get("create_msg"):
+        level, msg = S.pop("create_msg"); (st.error if level == "error" else st.success)(msg)
+    if pick_project:
+        st.caption(f"Every change saves as you make it, to `{PROJECTS / pick_project}`. There's no Save button; Undo steps back.")
+    page = st.radio("Edit", PAGES + ["Settings"]) if pick_project else st.radio("Edit", ["Settings"], key="page_empty")
+    if S.undo and pick_project and st.button("Undo last change", help="Undoes edits to the spec files; painted layers and uploads stay"):
+        reload(S.undo.pop()); S.undoing = True; st.rerun()
+if page == "Settings": settings_page(); st.stop()
 if S.get("loaded") != pick_project:
     S.proj, S.loaded, S.undo = spec.load(PROJECTS / pick_project), pick_project, []; S.ver += 1
     S.saved = copy.deepcopy(S.proj)
 P = S.proj; G = P["game"]; LANG = G.get("lang", "en"); ROOT = Path(P["root"]); I = spec.ids(P)
 PNGS = [f for f in I["file"] if f.endswith(".png")]
 AUDIO = [f for f in I["file"] if f.endswith((".wav", ".ogg", ".mp3", ".flac"))]
-with st.sidebar:
-    page = st.radio("Edit", ["Game", "Map", "Locations", "Objects", "Characters", "Dialogue", "Strings", "Assets",
-                             "Assistant", "Check & export", "AI assets"])
-    if S.undo and st.button("Undo last change", help="Undoes edits to the spec files; painted layers and uploads stay"):
-        reload(S.undo.pop()); S.undoing = True; st.rerun()
 
 
 # ---------------- pickers bound to real IDs ----------------
@@ -84,10 +150,14 @@ def txt(lid): return P["strings"].get(LANG, {}).get(lid, "")
 def label(i): return "—" if i == "" else (f"{spec.name(P, i)} ({i})" if spec.name(P, i) != i else i)
 
 
-def pick(lbl, options, value, key, blank=True):
+def pick(lbl, options, value, key, blank=True, help=None):
     opts = ([""] if blank else []) + list(options)
     if value not in opts: opts.append(value)
-    return st.selectbox(lbl, opts, opts.index(value), key=key, format_func=label)
+    return st.selectbox(lbl, opts, opts.index(value), key=key, format_func=label, help=help)
+
+
+MARK_HELP = ("A mark is a named spot in a room, like by_the_door. Place marks on the Locations page by clicking the room's "
+             "picture where a character's feet should go.")
 
 
 def line(lbl, lid, key, hint="line"):
@@ -217,41 +287,53 @@ def fallbacks(d, owner):
 
 
 def add_entity(kind):
-    i = S.get(f"new:{kind}", "").strip()
-    if re.fullmatch(r"[a-z][a-z0-9_]*", i) and not any(i in P[k] for k in ("locations", "objects", "characters")):
-        S.proj[kind][i] = spec.blank(kind, i); S[f"sel:{kind}"] = i; S.ver += 1; S.dirty = True
+    """Add a location, object or character from the name typed. The name becomes its display name
+    and its id is made from it ("Living Room" -> living_room). Says why when it can't."""
+    name = S.get(f"new:{kind}", "").strip(); i = spec.make_id(name)
+    if not i: S[f"msg:{kind}"] = "Type a name, using some letters or numbers."; return
+    taken = next((k[:-1] for k in ("locations", "objects", "characters") if i in S.proj[k]), None)
+    if taken: S[f"msg:{kind}"] = f"'{i}' is already a {taken}'s id (locations, objects and characters share ids)."; return
+    sheet = spec.blank(kind, i)
+    tab = S.proj["strings"].setdefault(S.proj["game"].get("lang", "en"), {})
+    sid, n = f"str_{i}", 2
+    while sid in tab: sid, n = f"str_{i}_{n}", n + 1
+    tab[sid], sheet["name"] = name, sid
+    S.proj[kind][i] = sheet; S[f"sel:{kind}"] = i; S[f"new:{kind}"] = ""; S.ver += 1; S.dirty = True
+
+
+EXAMPLE = {"locations": "Living Room", "objects": "Brass Key", "characters": "Old Sailor"}
 
 
 def entity(kind, title):
-    """Pick an existing entity or add a new one. Returns the selected ID (or None)."""
-    c = st.columns([3, 2, 1, 1])
+    """Pick an existing entity or add a new one (type a name, press Enter or Add). Returns the
+    selected ID (or None)."""
+    c = st.columns([3, 3, 1], vertical_alignment="bottom")
     cur = c[0].selectbox(title, list(P[kind]), key=f"sel:{kind}", format_func=label) if P[kind] else None
-    c[1].text_input(f"New {title.lower()} id", key=f"new:{kind}", placeholder="lowercase_id")
-    c[2].button("Add", key=f"add:{kind}", on_click=add_entity, args=(kind,))
-    if cur and c[3].button("Delete", key=K("del", kind)): spec.delete(P, kind, cur); S.pop(f"sel:{kind}", None); restructure()
+    with c[1].form(f"add:{kind}", border=False):
+        f = st.columns([3, 1], vertical_alignment="bottom")
+        f[0].text_input(f"New {title.lower()}", key=f"new:{kind}", placeholder=EXAMPLE[kind])
+        f[1].form_submit_button("Add", on_click=add_entity, args=(kind,))
+    if cur and c[2].button("Delete", key=K("del", kind)): spec.delete(P, kind, cur); S.pop(f"sel:{kind}", None); restructure()
+    if S.get(f"msg:{kind}"): st.error(S.pop(f"msg:{kind}"))
     return cur
 
 
 # ---------------- location layer editor ----------------
 
 def composite(lid, l, bg, show):
-    """Background plus the chosen layers, marks, the polygon being drawn, and characters previewed
-    at their marks, anchored at the feet, at the scale the depth mask gives them there."""
+    """The background with its objects (in their starting state) and, with marks shown, characters
+    at their marks, all in the engine's draw order. Over that, the chosen layers, the marks, and
+    the polygon being drawn. An object that's only here under some condition is drawn faded."""
     im = bg.copy()
-
-    def over(rel, how, alpha, tint=(0, 255, 120)):
-        if not rel or not (ROOT / rel).is_file(): return
-        m = Image.open(ROOT / rel).convert("RGB").resize(bg.size)
-        a = m.convert("L").point(lambda v: int(alpha * 255) if v or how == "image" else 0)
-        layer = (Image.new("RGB", bg.size, tint) if how == "tint" else m).convert("RGBA"); layer.putalpha(a)
-        im.alpha_composite(layer)
-
-    over(l.get("walkway"), "tint", .45 if "walkway" in show else .15)     # always faintly visible
-    if "objects" in show: over(l.get("objects_mask"), "colour", .55)
-    if "depth" in show: over(l.get("depth"), "image", .6)
-    if "walk-behinds" in show:
-        for b in l.get("walkbehinds", []): over(b["mask"], "tint", .45, (255, 0, 255))
-    d = ImageDraw.Draw(im)
+    items = []          # (layer, bottom edge, listed order, image, top-left): sorted like the engine's scene()
+    states = spec.new_state(P)["objects"]
+    for k, (o, h) in enumerate(l.get("hotspots", {}).items()):
+        sprite = P["objects"].get(o, {}).get("states", {}).get(states.get(o, ""), "")
+        if states.get(o) == "gone" or not sprite or "pos" not in h or not (ROOT / sprite).is_file(): continue
+        sp = Image.open(ROOT / sprite).convert("RGBA")
+        if h.get("if"): sp.putalpha(sp.getchannel("A").point(lambda a: a // 2))
+        x, y = (max(0, int(v)) for v in h["pos"])
+        items.append(({"back": 0, "front": 2}.get(h.get("layer"), 1), y + sp.height, k, sp, (x, y)))
     if "marks" in show:
         depth = Image.open(ROOT / l["depth"]).convert("L") if l.get("depth") and (ROOT / l["depth"]).is_file() else None
         s0, s1 = l.get("scale", [1, 1])
@@ -267,7 +349,24 @@ def composite(lid, l, bg, show):
             row = 2 if a.get("rows", 1) == 8 else 0                                 # facing the viewer
             sc = s0 + (s1 - s0) * (depth.getpixel((min(int(x), bg.width - 1), min(int(y), bg.height - 1))) / 255 if depth else 1)
             f = sh.crop((0, row * fh, fw, (row + 1) * fh)).resize((max(1, int(fw * sc)), max(1, int(fh * sc))))
-            im.alpha_composite(f, (max(0, int(x - f.width / 2)), max(0, int(y - f.height))))
+            items.append((1, y, len(l.get("hotspots", {})), f, (max(0, int(x - f.width / 2)), max(0, int(y - f.height)))))
+    for _, _, _, sp, xy in sorted(items, key=lambda t: (t[0], t[1] if t[0] == 1 else 0, t[2])):
+        im.alpha_composite(sp, xy)
+
+    def over(rel, how, alpha, tint=(0, 255, 120)):
+        if not rel or not (ROOT / rel).is_file(): return
+        m = Image.open(ROOT / rel).convert("RGB").resize(bg.size)
+        a = m.convert("L").point(lambda v: int(alpha * 255) if v or how == "image" else 0)
+        layer = (Image.new("RGB", bg.size, tint) if how == "tint" else m).convert("RGBA"); layer.putalpha(a)
+        im.alpha_composite(layer)
+
+    over(l.get("walkway"), "tint", .45 if "walkway" in show else .15)     # always faintly visible
+    if "objects" in show: over(l.get("objects_mask"), "colour", .55)
+    if "depth" in show: over(l.get("depth"), "image", .6)
+    if "walk-behinds" in show:
+        for b in l.get("walkbehinds", []): over(b["mask"], "tint", .45, (255, 0, 255))
+    d = ImageDraw.Draw(im)
+    if "marks" in show:
         for m, (x, y) in l.get("marks", {}).items():
             d.ellipse([x - 3, y - 3, x + 3, y + 3], fill="yellow", outline="black"); d.text((x + 5, y - 12), m, fill="white")
     if S.pts:
@@ -293,39 +392,87 @@ def paint(rel, size, fill, poly, gradient=False):
 
 
 def layer_editor(lid, l):
+    """The picture (clicking it places a mark or a polygon point) with its controls beside it, so
+    naming a mark or filling a polygon happens in view of the picture. Uploads sit in an expander."""
     if S.get("pts_loc") != lid: S.pts, S.click, S.pts_loc = [], None, lid
-    up = st.file_uploader("Upload a background or layer image", type=["png", "jpg"], key=K(lid, "up"))
-    which = st.selectbox("It is the", list(LAYER_FILE), key=K(lid, "upwhich"))
-    if up and st.button("Save image", key=K(lid, "upsave")):
-        rel = f"locations/{lid}/{LAYER_FILE[which]}.png"
-        (ROOT / rel).parent.mkdir(parents=True, exist_ok=True); Image.open(up).convert("RGB").save(ROOT / rel)
-        put(l, which, rel); restructure()
-    if not (ROOT / l.get("background", "")).is_file(): st.info("Upload a background to start drawing layers."); return
+    has_bg = (ROOT / l.get("background", "")).is_file()
+    with st.expander("Upload a background or layer image", expanded=not has_bg):
+        up = st.file_uploader("Image", type=["png", "jpg"], key=K(lid, "up"))
+        which = st.selectbox("It is the", list(LAYER_FILE), key=K(lid, "upwhich"))
+        if up and st.button("Save image", key=K(lid, "upsave")):
+            rel = f"locations/{lid}/{LAYER_FILE[which]}.png"
+            (ROOT / rel).parent.mkdir(parents=True, exist_ok=True); Image.open(up).convert("RGB").save(ROOT / rel)
+            put(l, which, rel); restructure()
+    if not has_bg: st.info("Upload a background to start drawing layers."); return
     bg = Image.open(ROOT / l["background"]).convert("RGBA")
-    c = st.columns([3, 2])
-    show = c[0].multiselect("Show layers", ["walkway", "objects", "depth", "walk-behinds", "marks"], ["marks"], key=K(lid, "show"))
-    mode = c[1].radio("Clicking the image will", ["place a mark", "add a polygon point"], key=K(lid, "mode"), horizontal=True)
-    click = streamlit_image_coordinates(composite(lid, l, bg, show), key=K(lid, "img"))
+    pic, side = st.columns([3, 2])
+    with side:
+        show = st.multiselect("Show layers", ["walkway", "objects", "depth", "walk-behinds", "marks"], ["marks"], key=K(lid, "show"))
+        mode = st.radio("Clicking the picture will", ["place a mark", "add a polygon point"], key=K(lid, "mode"), horizontal=True)
+        if mode == "place a mark": mark_controls(lid, l)
+        else: polygon_controls(lid, l, bg)
+    with pic:      # stretched to the column; clicks are scaled back to the picture's own pixels
+        click = streamlit_image_coordinates(composite(lid, l, bg, show), key=K(lid, "img"), width="stretch")
     if click and click != S.get("last_click"):
         S.last_click = click
         xy = (round(click["x"] * bg.width / click.get("width", bg.width)), round(click["y"] * bg.height / click.get("height", bg.height)))
         if mode == "place a mark": S.click = xy
         else: S.pts = S.pts + [xy]
         st.rerun()
-    if mode == "place a mark":
-        if S.click:
-            c = st.columns([3, 1])
-            nm = c[0].text_input(f"Name the mark at {S.click} (put it at the character's feet)", key=K(lid, "mname"))
-            if c[1].button("Add mark", disabled=not re.fullmatch(r"[a-z][a-z0-9_]*", nm or "")):
-                l.setdefault("marks", {})[nm] = list(S.click); S.click = None; restructure()
-        return
+
+
+LAYERS = {"back": "Back (behind characters)", "depth": "Depth (the default)", "front": "Front (in front of all)"}
+
+
+def placed_objects(lid, l):
+    """Each object in the room in draw order: its layer, moving it back or forward in the list, and
+    the conditions under which it's here. The engine draws and clicks in exactly this order."""
+    hot = l.get("hotspots", {})
+    if not hot: return
+    st.subheader("Objects in this room")
+    st.caption("**Back** is behind characters (rugs, wall art). **Depth** sorts with characters by bottom edge. **Front** is "
+               "in front of everything. Within a layer, lower in this list is in front. Clicks go to whatever is drawn in "
+               "front. An object is only here (drawn and clickable) while its conditions hold.")
+    ids, swap = list(hot), None
+    for i, o in enumerate(ids):
+        h = hot[o]
+        c = st.columns([3, 3, 1, 1, 5], vertical_alignment="center")
+        n = len(h.get("if", []))
+        held = "its condition holds" if n == 1 else f"its {n} conditions hold"
+        c[0].markdown(f"**{i + 1}.** {label(o)}" + (f"  \n*only here while {held}*" if n else ""))
+        layer = c[1].selectbox(f"Layer for {o}", list(LAYERS), list(LAYERS).index(h.get("layer", "depth")), format_func=LAYERS.get,
+                               key=K(lid, "layer", o), label_visibility="collapsed")
+        put(h, "layer", "" if layer == "depth" else layer)          # depth is the default, so it isn't written
+        if i and c[2].button("▲", key=K(lid, "back", o), help="Earlier in the list: drawn further back"): swap = (i, i - 1)
+        if i < len(ids) - 1 and c[3].button("▼", key=K(lid, "fwd", o), help="Later in the list: drawn further forward"): swap = (i, i + 1)
+        with c[4].expander("Only here if…"):
+            edit_list(h.setdefault("if", []), spec.CONDS, K(lid, "hotif", o), lid)
+        if not h["if"]: h.pop("if")
+    if swap:
+        i, j = swap; ids[i], ids[j] = ids[j], ids[i]
+        l["hotspots"] = {o: hot[o] for o in ids}; restructure()
+
+
+def mark_controls(lid, l):
+    if not S.click: st.caption("Click the picture where a character's feet should go."); return
+    nm = st.text_input(f"Name the mark at {S.click}", key=K(lid, "mname"), help="Marks are anchored at the feet.")
+    mid = spec.make_id(nm or "")
+    if nm and not mid: st.caption("Use some letters or numbers.")
+    elif mid in l.get("marks", {}): st.caption(f"Adding moves the existing mark '{mid}' here.")
+    elif mid and mid != nm: st.caption(f"Saved as '{mid}'.")
+    if st.button("Add mark", key=K(lid, "addmark"), disabled=not mid):
+        l.setdefault("marks", {})[mid] = list(S.click); S.click = None; restructure()
+
+
+def polygon_controls(lid, l, bg):
+    st.caption(f"{len(S.pts)} point(s) so far. Click the picture to add more; three make a polygon.")
     wb = l.get("walkbehinds", [])
     targets = ["walkway", "depth gradient"] + [f"object {o}" for o in l.get("hotspots", {})] + [f"walk-behind {i}" for i in range(len(wb))] + ["new walk-behind"]
-    c = st.columns([3, 1, 1, 1])
-    tgt = c[0].selectbox("Fill the polygon into", targets, key=K(lid, "tgt"))
-    erase = c[1].checkbox("Erase", key=K(lid, "erase"))
-    if c[3].button("Clear points"): S.pts = []; st.rerun()
-    if c[2].button("Fill", disabled=len(S.pts) < 3, type="primary"):
+    tgt = st.selectbox("Fill the polygon into", targets, key=K(lid, "tgt"))
+    erase = st.checkbox("Erase", key=K(lid, "erase"))
+    c = st.columns(2)
+    if c[1].button("Clear points", key=K(lid, "clear")): S.pts = []; st.rerun()
+    if c[0].button("Fill", key=K(lid, "fill"), disabled=len(S.pts) < 3, type="primary"):
         if tgt == "walkway": rel, fill = l.get("walkway") or f"locations/{lid}/walk.png", (255, 255, 255); put(l, "walkway", rel)
         elif tgt == "depth gradient": rel, fill = l.get("depth") or f"locations/{lid}/depth.png", None; put(l, "depth", rel)
         elif tgt.startswith("object"):
@@ -343,13 +490,17 @@ def layer_editor(lid, l):
 
 if page == "Game":
     st.header("Game")
+    if not P["locations"]:
+        st.info("This game has no locations yet. Start on the **Locations** page: add one and upload its background. "
+                "Then come back here and pick it as the start location.")
     c = st.columns(4)
     with c[0]: put(G, "title", line("Title", G.get("title", ""), "title", "title"))
     put(G, "lang", c[1].text_input("Main language", LANG, key=K("lang")), default="en")
     with c[2]: put(G, "player", pick("Player character", I["character"], G.get("player", ""), K("player")))
-    with c[3]: put(G, "ending", pick("Ending flag", I["flag"], G.get("ending", ""), K("ending")))
+    with c[3]: put(G, "ending", pick("Ending flag", I["flag"], G.get("ending", ""), K("ending"),
+                                     help="The game ends when this flag becomes true. Add it under Flags below first."))
     w, h = G.get("resolution", [640, 360])
-    c = st.columns(4)
+    c = st.columns([1, 1, 2])         # the verbs get room to show every verb
     put(G, "resolution", [c[0].number_input("Width", value=int(w), key=K("w")), c[1].number_input("Height", value=int(h), key=K("h"))],
         default=[640, 360])
     common = ["walk", "look", "talk", "use", "take", "open", "close", "push", "pull", "give"]
@@ -364,7 +515,8 @@ if page == "Game":
     style = c[0].radio("Style", list(STYLES), list(STYLES).index(ui["style"]), format_func=STYLES.get, key=K("ui_style"))
     labels = (c[1].radio("Verbs shown as", list(LABELS), list(LABELS).index(ui.get("labels", "words")), format_func=LABELS.get,
                          key=K("ui_labels")) if style == "bar" else "words")
-    speech = c[2].radio("Spoken lines appear", list(SPEECH), list(SPEECH).index(ui["speech"]), format_func=SPEECH.get, key=K("ui_speech"))
+    speech = c[2 if style == "bar" else 1].radio("Spoken lines appear", list(SPEECH), list(SPEECH).index(ui["speech"]),
+                                                 format_func=SPEECH.get, key=K("ui_speech"))     # no gap where labels would be
     icons = dict(ui.get("icons", {}))         # kept whatever the style, so switching back finds them again
     if style == "ring" or labels != "words":
         shown = [v for v in G.get("verbs", []) if not (style == "ring" and v == "walk")]
@@ -376,21 +528,32 @@ if page == "Game":
                 if icons[v] and (ROOT / icons[v]).is_file(): st.image(str(ROOT / icons[v]), width=32)
     new = spec.interface({"verbs": G.get("verbs", []), "interface": {"style": style, "labels": labels, "icons": icons, "speech": speech}})
     if new != ui: G["interface"] = new; changed()       # only settings the chosen style uses are written
-    st.subheader("Flags")
-    st.caption("Every flag is declared here with its default, so the Check can catch typos.")
+    st.subheader("Flags: what the game remembers")
+    st.caption("A flag is a yes/no fact the game remembers, like *guard_left* or *door_unlocked*. Rules set flags "
+               "(**set flag**) and check them (**if guard_left is set**), which is how one puzzle unlocks the next. "
+               "List each flag here with how it starts (ticked means yes); then the Check can catch a misspelt flag in a rule.")
     rows = [{"flag": f, "default": v} for f, v in G.get("flags", {}).items()]
-    put(G, "flags", {r["flag"]: bool(r.get("default", False)) for r in table(rows, ["flag", "default"], ("flags",), default=Col.CheckboxColumn()) if r.get("flag")})
-    st.subheader("Start state")
+    put(G, "flags", {r["flag"]: bool(r.get("default", False)) for r in table(rows, ["flag", "default"], ("flags",),
+                     flag=Col.TextColumn(help="A short name: lowercase, with underscores"),
+                     default=Col.CheckboxColumn("starts true?")) if r.get("flag")})
+    st.subheader("Where the game starts")
+    st.caption("The room the player starts in, the spot they stand on, what they're carrying, and where everyone else is.")
     s = G.setdefault("start", {})
     c = st.columns(3)
-    with c[0]: put(s, "location", pick("Location", I["location"], s.get("location", ""), K("sloc")))
-    with c[1]: put(s, "mark", pick("Mark", list(P["locations"].get(s.get("location"), {}).get("marks", {})), s.get("mark", ""), K("smark")))
-    put(s, "inventory", c[2].multiselect("Inventory", I["item"], [i for i in s.get("inventory", []) if i in I["item"]], key=K("sinv"), format_func=label))
+    with c[0]: put(s, "location", pick("Starting location", I["location"], s.get("location", ""), K("sloc")))
+    start_marks = list(P["locations"].get(s.get("location"), {}).get("marks", {}))
+    with c[1]:
+        put(s, "mark", pick("Starting spot (a mark)", start_marks, s.get("mark", ""), K("smark"), help=MARK_HELP))
+        if s.get("location") and not start_marks: st.caption("This location has no marks yet: add one on the Locations page.")
+    put(s, "inventory", c[2].multiselect("Starting inventory", I["item"], [i for i in s.get("inventory", []) if i in I["item"]],
+                                         key=K("sinv"), format_func=label, help="Only objects with an inventory icon can be carried."))
+    st.caption("Other characters, and where each one starts (a room and a mark in it):")
     rows = [{"character": k, **v} for k, v in s.get("characters", {}).items()]
     new = table(rows, ["character", "location", "mark", "state"], ("schars",), character=Col.SelectboxColumn(options=I["character"]),
                 location=Col.SelectboxColumn(options=I["location"]), mark=Col.SelectboxColumn(options=I["mark"]))
     put(s, "characters", {r.pop("character"): r for r in new if r.get("character")})
     st.subheader("Default responses")
+    st.caption("What the player says when a verb is used on something with no rule or line of its own for it.")
     new = {}
     for col, v in zip(st.columns(len(I["verb"]) or 1), I["verb"]):
         with col: new[v] = line(v, G.get("defaults", {}).get(v, ""), f"def:{v}", f"default_{v}")
@@ -400,7 +563,8 @@ if page == "Game":
 
 elif page == "Map":
     st.header("Map")
-    st.caption("Every connection between locations. Location pages say which hotspot triggers each one.")
+    st.caption("Every way between locations: where it goes from and to, and **spawn**, the mark the player arrives on. "
+               "Each location's page then says which of its objects (a door, say) leads this way.")
     new = table(P["map"].get("edges", []), ["id", "from", "to", "spawn"], ("edges",), spawn=Col.SelectboxColumn(options=I["mark"]),
                 **{"from": Col.SelectboxColumn(options=I["location"]), "to": Col.SelectboxColumn(options=I["location"])})
     put(P["map"], "edges", [r for r in new if r.get("id")])
@@ -425,6 +589,9 @@ elif page == "Locations":
         a, b = st.columns(2)
         with a:
             st.subheader("Marks")
+            st.caption("Named spots in this room, like *by_the_door*. Click the picture to place one, at a character's feet. "
+                       "Characters start on marks and walk to them, each object names the mark the player walks to before using "
+                       "it, and each exit names the mark the player arrives on.")
             rows = [{"mark": m, "x": xy[0], "y": xy[1]} for m, xy in l.get("marks", {}).items()]
             put(l, "marks", {r["mark"]: [r.get("x", 0), r.get("y", 0)] for r in table(rows, ["mark", "x", "y"], (lid, "marks")) if r.get("mark")})
             st.subheader("Walk-behinds")
@@ -433,15 +600,18 @@ elif page == "Locations":
                                    table(l.get("walkbehinds", []), ["mask", "baseline"], (lid, "wb"), mask=Col.SelectboxColumn(options=PNGS)) if r.get("mask")])
         with b:
             st.subheader("Hotspots")
-            st.caption("Each object's colour in the object mask, the mark the player walks to, and where its sprite is drawn.")
+            st.caption("Each object's colour in the object mask (its click area if it has no sprite, extra area if it has), "
+                       "the mark the player walks to, and where its sprite's top-left goes.")
+            old_hot = l.get("hotspots", {})
             rows = [{"object": o, "color": h["color"], "mark": h["mark"], "x": h.get("pos", [None, None])[0], "y": h.get("pos", [None, None])[1]}
-                    for o, h in l.get("hotspots", {}).items()]
-            new, used = {}, [h["color"] for h in l.get("hotspots", {}).values()]
+                    for o, h in old_hot.items()]
+            new, used = {}, [h["color"] for h in old_hot.values()]
             for r in table(rows, ["object", "color", "mark", "x", "y"], (lid, "hot"), object=Col.SelectboxColumn(options=I["object"]),
                            mark=Col.SelectboxColumn(options=marks)):
                 if not r.get("object"): continue
                 colour = r.get("color") or next((p for p in PALETTE if p not in used), "#808080"); used.append(colour)   # auto-pick a free colour
-                new[r["object"]] = {"color": colour, "mark": r.get("mark", ""), **({"pos": [r["x"], r["y"]]} if "x" in r and "y" in r else {})}
+                kept = {k: v for k, v in old_hot.get(r["object"], {}).items() if k in ("layer", "if")}   # set below, not in the table
+                new[r["object"]] = {"color": colour, "mark": r.get("mark", ""), **({"pos": [r["x"], r["y"]]} if "x" in r and "y" in r else {}), **kept}
             put(l, "hotspots", new)
             st.subheader("Exits")
             st.caption("Walking onto the hotspot takes the map edge, if the hotspot's object is in the given state.")
@@ -449,6 +619,7 @@ elif page == "Locations":
             put(l, "exits", {r.pop("edge"): r for r in table(rows, ["edge", "hotspot", "state"], (lid, "exits"),
                              edge=Col.SelectboxColumn(options=[e["id"] for e in P["map"].get("edges", []) if e["from"] == lid]),
                              hotspot=Col.SelectboxColumn(options=list(l.get("hotspots", {})))) if r.get("edge")})
+        placed_objects(lid, l)
         st.subheader("Characters placed here")
         old = l.get("npcs", [])
         new = table([{k: n.get(k) for k in ("character", "mark", "facing", "state")} for n in old], ["character", "mark", "facing", "state"], (lid, "npcs"),
@@ -550,9 +721,13 @@ elif page == "Dialogue":
                 for k in ("do", "options"):
                     if not n[k]: n.pop(k)
         if drop: nodes.pop(drop); restructure()
-        c = st.columns([3, 1])
-        nn = c[0].text_input("New node id", key=K(cid, f, "newnode"))
-        if c[1].button("Add node", disabled=not re.fullmatch(r"[a-z][a-z0-9_]*", nn or "") or nn in nodes): nodes[nn] = {}; restructure()
+        c = st.columns([3, 1], vertical_alignment="bottom")
+        nn = c[0].text_input("New node", key=K(cid, f, "newnode"), placeholder="Ask about the cat")
+        nid = spec.make_id(nn or "")
+        if nn and not nid: st.caption("Use some letters or numbers.")
+        elif nid in nodes: st.caption(f"There's already a node '{nid}'.")
+        elif nid and nid != nn: st.caption(f"Saved as '{nid}'.")
+        if c[1].button("Add node", disabled=not nid or nid in nodes): nodes[nid] = {}; restructure()
 
 elif page == "Strings":
     st.header("Strings")
@@ -620,11 +795,11 @@ elif page == "Check & export":
         r = S.get("report")
         if r and r["ending"]: st.success(f"Solver explored {r['states']} states. Shortest route to the ending: " + " → ".join(r["ending_path"]))
     c = st.columns(2)
-    if c[0].button("Export dev build (unencrypted)"): S.export = spec.export(P, EXPORTS, encrypted=False)
+    if c[0].button("Export dev build (unencrypted)"): S.export = spec.export(P, config.folder("exports"), encrypted=False)
     if c[1].button("Export release build (encrypted)"):
         S.issues, S.report = check.run_all(P)
         if any(lvl == "error" for lvl, _, _ in S.issues): st.error("Release builds need a clean Check. Fix the errors above first.")
-        else: S.export = spec.export(P, EXPORTS, encrypted=True)
+        else: S.export = spec.export(P, config.folder("exports"), encrypted=True)
     if S.get("export"):
         out, key = S.export
         st.download_button(f"Download {out.name}", out.read_bytes(), out.name)
@@ -643,7 +818,7 @@ elif page == "AI assets":
         for k in ("llm_model", "llm_url", "llm_name", "tts_models", "tts_url", "image_model", "image_model_inpaint", "image_url", "audio_url"):
             cfg[k] = st.text_input(k, cfg[k], key=f"cfg:{k}")
         cfg["api_key"] = st.text_input("API key for remote backends", cfg["api_key"], type="password")
-        if st.button("Save settings"): ai.save_settings(cfg); st.success("Saved to editor/ai.yaml")
+        if st.button("Save settings"): ai.save_settings(cfg); st.success(f"Saved to {config.settings_file()}")
 
     def attempt(fn, *a):
         try: return fn(*a)

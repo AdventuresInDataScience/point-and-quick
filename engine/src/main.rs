@@ -30,10 +30,12 @@ const TEXT: f32 = 16.0; // speech text size
 type View = (f32, f32, f32);
 
 /// A loaded location: GPU textures (background, object sprites, walk-behind cut-outs), CPU
-/// masks (object mask for hit-testing, depth for scaling) and the walk grid.
+/// masks (object mask for hit-testing, depth for scaling), CPU copies of the object sprites
+/// (clicks hit their visible pixels; they're small) and the walk grid.
 pub struct Room {
     pub tex: HashMap<String, Texture2D>,
     pub masks: HashMap<String, Image>,
+    pub sprites: HashMap<String, Image>,
     pub walk: Vec<bool>,
     pub gw: usize,
     pub gh: usize,
@@ -60,6 +62,9 @@ pub struct G {
     pub arrive: Option<(String, String, String)>, // (verb, target, item) to do on reaching the target
     pub press: Option<ui::Press>,                 // ring style: a left press not yet let go
     pub inv_open: bool,                           // ring style: the inventory is showing
+    pub pause: Option<ui::Pause>,                 // the menu (Esc) is open: the game is paused
+    pub saves: std::path::PathBuf,                // this game's saves folder ("" in the tests: no saving)
+    pub autosave: bool,                           // a room was entered: autosave once it has settled
     pub tex: HashMap<String, Texture2D>,          // character sheets and icons, loaded once
     pub rooms: HashMap<String, Room>,             // the current room and its map neighbours
     pub pending: Vec<String>,                     // rooms the loader thread is working on
@@ -222,14 +227,17 @@ fn pump(g: &mut G) {
         }
     }
     let size = imgs.get("bg").map(|i| vec2(i.width as f32, i.height as f32)).unwrap_or(vec2(640.0, 360.0));
-    let mut tex = HashMap::new();
+    let (mut tex, mut sprites) = (HashMap::new(), HashMap::new());
     for (name, img) in imgs {
         let t = Texture2D::from_image(&img);
         t.set_filter(FilterMode::Nearest);
+        if name != "bg" && !name.starts_with("behind") {
+            sprites.insert(name.clone(), img); // object sprites are named by their path
+        }
         tex.insert(name, t);
     }
     let (walk, gw, gh) = bake_walk(&masks, size);
-    g.rooms.insert(loc, Room { tex, masks, walk, gw, gh });
+    g.rooms.insert(loc, Room { tex, masks, sprites, walk, gw, gh });
 }
 
 /// The walk grid for a room of the given size: a cell is walkable where the walkway mask is
@@ -469,11 +477,70 @@ fn object_at(g: &G, p: Vec2) -> String {
     let i = (p.y as usize * img.width as usize + p.x as usize) * 4;
     let hex = format!("#{:02x}{:02x}{:02x}", img.bytes[i], img.bytes[i + 1], img.bytes[i + 2]);
     for (id, h) in &g.spec.locations[&g.st.location].hotspots {
-        if h.color.to_lowercase() == hex && logic::active(g, id) {
+        if h.color.to_lowercase() == hex && logic::shown(g, id) {
             return id.clone();
         }
     }
     String::new()
+}
+
+/// Whether an object's sprite, drawn with its top-left at pos, has a visible pixel at p.
+fn opaque(room: &Room, sprite: &str, pos: [f32; 2], p: Vec2) -> bool {
+    let Some(img) = room.sprites.get(sprite) else { return false };
+    let (x, y) = (p.x - pos[0], p.y - pos[1]);
+    x >= 0.0 && y >= 0.0 && x < img.width as f32 && y < img.height as f32 && img.get_pixel(x as u32, y as u32).a > 0.5
+}
+
+/// What's drawn over the room's background, back to front, as (kind, id, sprite): kind is
+/// "object", "character" or "behind" (a walk-behind, id behind<i>). The back layer comes first
+/// (objects in their listed order), then the depth layer sorted by bottom edge (objects, characters
+/// and walk-behinds; the listed order breaks ties), then the front layer (in listed order).
+/// Objects that aren't here, or have no sprite in their state, aren't in it.
+fn scene(g: &G, room: &Room) -> Vec<(&'static str, String, String)> {
+    let loc = &g.spec.locations[&g.st.location];
+    let mut items = vec![]; // (layer, bottom edge, listed order, kind, id, sprite)
+    for (i, (id, hs)) in loc.hotspots.iter().enumerate() {
+        let state = g.st.objects.get(id).cloned().unwrap_or_default();
+        let sprite = g.spec.objects[id].states.get(&state).cloned().unwrap_or_default();
+        let Some(img) = room.sprites.get(&sprite) else { continue };
+        if logic::shown(g, id) {
+            let layer = match hs.layer.as_str() { "back" => 0, "front" => 2, _ => 1 };
+            items.push((layer, hs.pos[1] + img.height as f32, i, "object", id.clone(), sprite));
+        }
+    }
+    let n = loc.hotspots.len(); // characters, then walk-behinds, after objects on a tie
+    for (id, p) in &g.pos {
+        items.push((1, p.y, n, "character", id.clone(), String::new()));
+    }
+    for (i, b) in loc.walkbehinds.iter().enumerate() {
+        items.push((1, b.baseline, n + 1, "behind", format!("behind{i}"), String::new()));
+    }
+    items.sort_by(|a, b| {
+        let depth = if a.0 == 1 && b.0 == 1 { a.1.total_cmp(&b.1) } else { std::cmp::Ordering::Equal };
+        a.0.cmp(&b.0).then(depth).then(a.2.cmp(&b.2)).then(a.4.cmp(&b.4))
+    });
+    items.into_iter().map(|(_, _, _, kind, id, sprite)| (kind, id, sprite)).collect()
+}
+
+/// What's under a point in the scene. Front to back as drawn: a character by its box, an object
+/// by its sprite's visible pixels or its colour in the object mask. After that, an object painted
+/// into the background (one with no sprite drawn), by its colour. The player is never hit, and
+/// neither is an object that isn't here.
+fn target_at(g: &G, p: Vec2) -> String {
+    let Some(room) = g.rooms.get(&g.st.location) else { return String::new() };
+    let painted = object_at(g, p); // the object whose colour is under p, if it's here
+    let loc = &g.spec.locations[&g.st.location];
+    for (kind, id, sprite) in scene(g, room).into_iter().rev() {
+        let hit = match kind {
+            "character" => id != g.spec.game.player && char_rect(g, &id).contains(p),
+            "object" => id == painted || opaque(room, &sprite, loc.hotspots[&id].pos, p),
+            _ => false, // walk-behinds are scenery
+        };
+        if hit {
+            return id;
+        }
+    }
+    painted
 }
 
 /// Which sheet and frame to draw for a character now: walk, talk, its state's set, or idle.
@@ -498,16 +565,6 @@ fn char_rect(g: &G, id: &str) -> Rect {
     let (w, h) = frame(g, id).map(|f| (f.1.w, f.1.h)).unwrap_or((32.0, 64.0));
     let s = depth_scale(g, p);
     Rect::new(p.x - w * s / 2.0, p.y - h * s, w * s, h * s)
-}
-
-/// What's under the mouse in the scene: an NPC first, then a hotspot.
-fn target_at(g: &G, p: Vec2) -> String {
-    for (c, _, _) in logic::npcs_here(g) {
-        if g.pos.contains_key(&c) && char_rect(g, &c).contains(p) {
-            return c;
-        }
-    }
-    object_at(g, p)
 }
 
 // ---------------- audio ----------------
@@ -641,32 +698,61 @@ fn click_target(g: &mut G, verb: &str, target: &str) {
     reset_verb(g);
 }
 
-/// F5 save, F9 load, [ and ] music volume, Esc quit.
+// ---------------- saving and loading ----------------
+
+/// Saving waits until the game is waiting for the player: no line, cutscene, conversation or room
+/// change under way. (A save holds the state, not what was in the middle of happening.)
+pub fn can_save(g: &G) -> bool {
+    !logic::busy(g) && g.queue.is_empty() && g.menu.is_none()
+}
+
+/// Save to a slot ("auto", "quick", "1".."6"). False if it couldn't be written (or, in the tests,
+/// when there's no saves folder).
+pub fn save_slot(g: &mut G, slot: &str) -> bool {
+    if g.saves.as_os_str().is_empty() {
+        return false;
+    }
+    match spec::write_save(&g.saves, slot, &g.st, &g.key) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("can't save to {}: {e}", g.saves.display());
+            false
+        }
+    }
+}
+
+/// Load a slot, dropping everything that was under way (including a room change). False if the
+/// slot is empty or unreadable.
+pub fn load_slot(g: &mut G, slot: &str) -> bool {
+    let Some((st, _)) = spec::read_save(&g.saves, slot, &g.spec, &g.key) else { return false };
+    g.st = st;
+    g.queue.clear();
+    g.menu = None;
+    g.speech = None;
+    g.arrive = None;
+    g.ended = false;
+    g.fade_edge.clear();
+    g.wait = 0.0;
+    g.cut_walk = false;
+    g.press = None;
+    g.inv_open = false;
+    g.pause = None;
+    g.autosave = false;
+    reset_verb(g);
+    room_changed(g);
+    true
+}
+
+/// A line from the engine itself (like "Saved."), said by the player.
+fn notice(g: &mut G, text: String) {
+    g.speech = Some((g.spec.game.player.clone(), text, 1.5));
+}
+
+/// Esc opens and closes the menu (or goes back a page in it). F5 quicksaves and F9 quickloads.
+/// [ and ] change the music volume.
 fn keys(g: &mut G) {
     if is_key_pressed(KeyCode::Escape) {
-        std::process::exit(0);
-    }
-    if is_key_pressed(KeyCode::F5) && !logic::busy(g) && g.queue.is_empty() && g.menu.is_none() {
-        spec::save(&g.st, &g.spec.game.id, &g.key);
-        g.speech = Some((g.spec.game.player.clone(), "Saved.".to_string(), 1.0));
-    }
-    if is_key_pressed(KeyCode::F9) {
-        if let Some(st) = spec::load_save(&g.spec, &g.key) {
-            g.st = st;
-            // drop everything that was mid-way when the player loaded, including a room change
-            g.queue.clear();
-            g.menu = None;
-            g.speech = None;
-            g.arrive = None;
-            g.ended = false;
-            g.fade_edge.clear();
-            g.wait = 0.0;
-            g.cut_walk = false;
-            g.press = None;
-            g.inv_open = false;
-            reset_verb(g);
-            room_changed(g);
-        }
+        ui::toggle_menu(g);
     }
     let step = if is_key_pressed(KeyCode::RightBracket) { 0.1 } else if is_key_pressed(KeyCode::LeftBracket) { -0.1 } else { 0.0 };
     if step != 0.0 {
@@ -674,6 +760,23 @@ fn keys(g: &mut G) {
         if let Some(a) = g.audio.as_mut() {
             a.music_bus.set_volume(Volume::Amplitude(g.volume), Tween::default()).ok();
         }
+    }
+    if g.pause.is_some() {
+        return;
+    }
+    if is_key_pressed(KeyCode::F5) {
+        let text = if !can_save(g) {
+            ui::text_or(g, "ui_cant_save", "You can't save in the middle of something.")
+        } else if save_slot(g, "quick") {
+            ui::text_or(g, "ui_saved", "Saved.")
+        } else {
+            ui::text_or(g, "ui_save_failed", "The game couldn't be saved.")
+        };
+        notice(g, text);
+    }
+    if is_key_pressed(KeyCode::F9) && !load_slot(g, "quick") {
+        let text = ui::text_or(g, "ui_no_quicksave", "There's no quicksave yet.");
+        notice(g, text);
     }
 }
 
@@ -711,9 +814,15 @@ fn update(g: &mut G, dt: f32) {
         if g.fade >= 1.0 {
             let e = std::mem::take(&mut g.fade_edge);
             logic::take_edge(g, &e);
+            g.autosave = true; // once the new room has settled
         }
     } else if g.rooms.contains_key(&g.st.location) {
         g.fade = (g.fade - dt * 3.0).max(0.0);
+    }
+    // autosave after entering a room, once its enter rule (any cutscene) has played out
+    if g.autosave && can_save(g) {
+        g.autosave = false;
+        save_slot(g, "auto");
     }
     let ending = g.spec.game.ending.clone();
     if !ending.is_empty() && g.st.flags.get(&ending) == Some(&true) && !logic::busy(g) && g.queue.is_empty() {
@@ -758,37 +867,30 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// The room: background, then objects, characters and walk-behinds back to front by baseline.
+/// The room: its background, then everything in scene() back to front.
 fn draw_room(g: &G, room: &Room, v: View) {
     let (w, h) = res(g);
     let full = Rect::new(0.0, 0.0, w, h);
     tex_at(&room.tex["bg"], full, None, false, v);
     let loc = &g.spec.locations[&g.st.location];
-    let mut layers: Vec<(f32, String, String)> = vec![]; // (baseline y, kind, texture or character)
-    for (id, hs) in &loc.hotspots {
-        let state = g.st.objects.get(id).cloned().unwrap_or_default();
-        let sprite = g.spec.objects[id].states.get(&state).cloned().unwrap_or_default();
-        if let Some(t) = room.tex.get(&sprite) {
-            layers.push((hs.pos[1] + t.height(), format!("object {id}"), sprite));
-        }
-    }
-    for (id, p) in &g.pos {
-        layers.push((p.y, "character".to_string(), id.clone()));
-    }
-    for (i, b) in loc.walkbehinds.iter().enumerate() {
-        layers.push((b.baseline, "behind".to_string(), format!("behind{i}")));
-    }
-    layers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    for (_, kind, id) in layers {
-        if kind == "character" {
-            if let Some((t, src, flip)) = frame(g, &id) {
-                tex_at(&t, char_rect(g, &id), Some(src), flip, v);
+    for (kind, id, sprite) in scene(g, room) {
+        match kind {
+            "character" => {
+                if let Some((t, src, flip)) = frame(g, &id) {
+                    tex_at(&t, char_rect(g, &id), Some(src), flip, v);
+                }
             }
-        } else if let Some(obj) = kind.strip_prefix("object ") {
-            let (t, pos) = (&room.tex[&id], loc.hotspots[obj].pos);
-            tex_at(t, Rect::new(pos[0], pos[1], t.width(), t.height()), None, false, v);
-        } else {
-            tex_at(&room.tex[&id], full, None, false, v);
+            "object" => {
+                if let Some(t) = room.tex.get(&sprite) {
+                    let pos = loc.hotspots[&id].pos;
+                    tex_at(t, Rect::new(pos[0], pos[1], t.width(), t.height()), None, false, v);
+                }
+            }
+            _ => {
+                if let Some(t) = room.tex.get(&id) {
+                    tex_at(t, full, None, false, v);
+                }
+            }
         }
     }
 }
@@ -810,6 +912,7 @@ fn draw(g: &G, mouse: ui::Mouse, v: View) {
         let end = g.spec.strings.get("str_the_end").cloned().unwrap_or("The End".to_string());
         text_at(&end, w / 2.0 - text_w(&end, 32.0) / 2.0, h / 2.0, 32.0, WHITE, v);
     }
+    ui::draw_menu(g, mouse, v); // the menu button, or the open menu over everything
 }
 
 // ---------------- main ----------------
@@ -832,17 +935,24 @@ fn boot(zip: &str, live: bool) -> G {
     // asset loader thread: jobs go in as (room, files), decoded images come back
     let (tx, jobs) = channel();
     let (done, rx) = channel();
-    let mut audio = None;
+    let (mut audio, mut saves) = (None, std::path::PathBuf::new());
     if live {
         let (zip2, key2) = (zip.to_string(), key.clone());
         std::thread::spawn(move || loader(zip2, key2, jobs, done));
         audio = start_audio(zip, &key);
+        saves = spec::saves_dir(&spec.game.id);
+        // a save from before save slots (./saves/<id>.sav, next to the game) becomes the quicksave
+        let old = std::path::Path::new("saves").join(format!("{}.sav", spec.game.id));
+        if old.is_file() && !saves.join("quick.sav").exists() && std::fs::create_dir_all(&saves).is_ok() {
+            std::fs::copy(&old, saves.join("quick.sav")).ok();
+        }
     }
     G {
         spec, st, zip: zip.to_string(), key,
         queue: vec![], speech: None, menu: None, wait: 0.0, cut_walk: false, fade: 1.0, fade_edge: String::new(),
         pos: HashMap::new(), path: HashMap::new(), dir: HashMap::new(),
         verb: "walk".to_string(), item: String::new(), arrive: None, press: None, inv_open: false,
+        pause: None, saves, autosave: false,
         tex: HashMap::new(), rooms: HashMap::new(), pending: vec![], tx, rx,
         audio, music_file: String::new(), music_fade: 1.0, volume: 1.0,
         t: 0.0, ended: false,
@@ -860,7 +970,6 @@ async fn main() {
 
     loop {
         let dt = get_frame_time().min(0.1);
-        g.t += dt;
         pump(&mut g);
         pump_audio(&mut g);
         let (w, h) = res(&g);
@@ -871,7 +980,10 @@ async fn main() {
             Some(a) => a.step(dt),
             None => ui::Mouse::read(v),
         };
-        update(&mut g, dt);
+        if g.pause.is_none() {
+            g.t += dt; // the menu pauses the game: no time passes, nothing moves
+            update(&mut g, dt);
+        }
         keys(&mut g);
         ui::input(&mut g, mouse);
         clear_background(BLACK);

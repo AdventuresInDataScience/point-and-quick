@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import check, spec
 
-DEMO = Path(__file__).resolve().parents[1] / "projects/demo"
+DEMO = Path(__file__).resolve().parents[1] / "examples/demo"
 
 
 @pytest.fixture
@@ -56,9 +56,26 @@ def test_dialogue_goto_to_nowhere(P):
     assert "goto 'nowhere' doesn't exist here" in errors(P)
 
 
-def test_hotspot_not_painted_in_the_object_mask(P):
-    P["locations"]["street"]["hotspots"]["key"]["color"] = "#123456"
-    assert any("#123456" in m and "can't be clicked" in m for m in errors(P))
+def test_hotspot_not_painted_and_with_no_sprite_in_some_state(P):
+    P["locations"]["street"]["hotspots"]["door"]["color"] = "#123456"       # the locked door is painted into the background
+    assert ("'door' can't be clicked while 'locked': it has no sprite then, and its colour #123456 isn't painted "
+            "in the object mask") in errors(P)
+
+
+def test_an_object_with_a_sprite_needs_no_painted_colour(P):
+    P["locations"]["street"]["hotspots"]["key"]["color"] = "#123456"        # clicked on its sprite instead
+    assert errors(P) == []
+
+
+def test_placement_conditions_are_checked(P):
+    P["locations"]["street"]["hotspots"]["key"]["if"] = [{"type": "flag", "flag": "no_such_flag"}]
+    assert "unknown flag 'no_such_flag'" in errors(P)
+
+
+def test_a_hidden_object_can_hide_the_ending(P):
+    # the key only shows once the game is won: so the door never opens and the game can't be won
+    P["locations"]["street"]["hotspots"]["key"]["if"] = [{"type": "flag", "flag": "game_won"}]
+    assert "the ending can never be reached" in errors(P)
 
 
 # --- tier 2: the solver

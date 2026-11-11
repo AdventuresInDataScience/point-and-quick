@@ -5,20 +5,27 @@ import base64, copy, hashlib, io, json, re, urllib.request, wave
 from pathlib import Path
 import numpy as np, yaml
 from PIL import Image
-import check, spec
+import check, config, spec
 
-CFG = Path(__file__).parent / "ai.yaml"
-DEFAULTS = {
-    "llm": "none", "llm_model": "models/llm", "llm_url": "http://localhost:8080/v1/chat/completions", "llm_name": "local",
-    "tts": "none", "tts_models": "models/piper", "tts_url": "",
-    "image": "none", "image_model": "models/sd", "image_model_inpaint": "models/sd-inpaint", "image_url": "",
-    "audio_url": "", "api_key": "",
-}
+LEGACY = Path(__file__).parent / "ai.yaml"         # where these settings lived before settings.yaml
 _models = {}                         # loaded models, kept for the session
 
 
-def settings(): return {**DEFAULTS, **(yaml.safe_load(CFG.read_text(encoding="utf-8")) if CFG.exists() else {})}
-def save_settings(cfg): CFG.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+def defaults():
+    models = Path(config.settings()["models"])       # model folders default to inside the models folder
+    return {"llm": "none", "llm_model": str(models / "llm"), "llm_url": "http://localhost:8080/v1/chat/completions",
+            "llm_name": "local", "tts": "none", "tts_models": str(models / "piper"), "tts_url": "",
+            "image": "none", "image_model": str(models / "sd"), "image_model_inpaint": str(models / "sd-inpaint"),
+            "image_url": "", "audio_url": "", "api_key": ""}
+
+
+def settings():
+    """The AI backends, from the `ai` section of the user's settings.yaml (see config.py)."""
+    saved = config.settings().get("ai") or (yaml.safe_load(LEGACY.read_text(encoding="utf-8")) if LEGACY.is_file() else {})
+    return {**defaults(), **(saved or {})}
+
+
+def save_settings(cfg): config.update(ai=cfg)
 
 
 def post(cfg, url, payload):

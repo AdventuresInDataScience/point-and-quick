@@ -8,16 +8,18 @@ editor/                     Python. Everything that authors a game.
   spec.py                   Project load/save, the condition/action tables, patch ops, zip export
   check.py                  The Check: tier 1 validation, tier 2 puzzle solver (simulates logic.rs)
   ai.py                     AI plugins: rule authoring, voices, art, sprite sheets, audio
+  config.py                 Where the editor keeps things: settings, projects, exports, models (never in editor/)
   app.py                    The Streamlit UI (all pages)
-  demo_assets.py            Draws placeholder art/audio (and the verb icons in ui/) for the demo project
-  projects/demo/            Hand-written test game: 2 rooms, a locked door, a key, a guard, a cake
-  tests/                    pytest: the Check against broken copies of the demo, and the parity scenarios
+  demo_assets.py            Draws placeholder art/audio (and the verb icons in ui/) for the demo
+  examples/demo/            Hand-written test game: 2 rooms, a locked door, a key, a guard, a cake. Ships
+                            with the editor and is never edited; copying it makes a project
+  tests/                    pytest: the Check, the parity scenarios, settings, and the editor's UI
 engine/                     Rust. Everything that plays a game.
   build.rs                  Compiles the game key in (masked) from GAME_KEY
-  src/spec.rs               Serde structs mirroring the schema; zip reading, decryption, saves
+  src/spec.rs               Serde structs mirroring the schema; zip reading, decryption, save files
   src/logic.rs              Game rules: conditions, verb dispatch, action queue, dialogue
-  src/main.rs               Window, asset streaming, walking, audio, drawing the room, main loop
-  src/ui.rs                 The interface styles: input, verbs, inventory, speech, dialogue options
+  src/main.rs               Window, asset streaming, walking, audio, saving, drawing the room, main loop
+  src/ui.rs                 The interface: input, verbs, inventory, speech, dialogue options, the menu
   src/tests.rs              cargo test: the parity scenarios, played through the engine
 tests/parity/               Scenarios both apps must play identically, and a tiny YAML-only game for them
 ```
@@ -48,7 +50,7 @@ A few conventions hold everywhere:
 - **IDs and paths.** Everything is referred to by ID string. Asset paths are relative to the project root, with forward slashes.
 - **Empty means none.** `""` means "none" (no sprite, no music, no gate).
 - **Colours.** Hotspots are identified by their exact colour in the object mask (`#rrggbb`), and the editor auto-assigns distinct ones.
-- **`gone`.** An object in the state `gone` is neither drawn nor clickable. That's how picked-up items leave the room.
+- **`gone`.** An object in the state `gone` isn't anywhere: neither drawn nor clickable. That's how picked-up items leave the room. (To have an object turn up or leave because of a flag, give its placement an `if` instead: see [Game semantics](#game-semantics).)
 - **Facing rows.** Animation sheets are grids: columns are frames, rows are 8 facing directions in the order e, se, s, sw, w, nw, n, ne. A sheet can also be 1 row, which is mirrored for westward facings. Feet sit at the bottom centre of each frame.
 - **Depth.** The depth mask runs black (far) to white (near). A location's `scale: [far, near]` maps that to character scale and walk speed.
 - **Strings.** Text never appears in rules, only string IDs. The editor's text fields mint an ID once from the first words of the text and keep it, so rewording a line keeps its translations, TTS file and "already said" tracking.
@@ -67,7 +69,14 @@ This is the behaviour both `engine/src/logic.rs` and the solver in `editor/check
 
 **Inventory clicks** (`click_item`). With Use selected, clicking an item picks it ("Use key with…"). Clicking a second item uses the first on it; clicking the picked item again uses it on its own, so a plain `use` rule on an item sheet works from the inventory. Using an item on itself never matches a combination. The solver's moves are exactly these: `use X (inventory)` is X on its own, and `use X on Y` is X on Y.
 
-**Placement conditions are live.** An NPC is in a room while the state puts it there and its placement's `if` holds. That's re-checked every frame, so an NPC appears or leaves as soon as its condition changes, without the player leaving the room. Hotspots can only be clicked where their colour is painted in the object mask, so the Check treats an unpainted hotspot as an error.
+**Placement conditions are live.** An NPC is in a room while the state puts it there and its placement's `if` holds. An object is in a room while it's placed there (in the location's `hotspots`), isn't `gone`, and its placement's `if` holds (`logic::shown`). Both are re-checked every frame, so things appear or leave as soon as a condition changes, without the player leaving the room. An object that isn't there is neither drawn nor clickable, and the solver doesn't offer it.
+
+**Draw order and clicks.** Each object placed in a room has a `layer`:
+- `back` objects are drawn behind characters, in their listed order (rugs, wall art);
+- `depth` objects, the default, sort with characters and walk-behinds by bottom edge, with the listed order breaking ties;
+- `front` objects are drawn in front of everything, in listed order.
+
+A click goes to the front-most thing under the mouse, in that same order. A character is hit by its sprite's box. An object is hit by its sprite's visible pixels, or by its colour in the object mask, which can add extra click area around a small sprite. After that come objects painted into the background (no sprite in their current state), by mask colour alone. So an object with a sprite needs no mask painting. One without a sprite in some state needs its colour painted, or it can't be clicked in that state. The Check makes that an error, which is what lets the solver treat every object that's there as clickable.
 
 **Exits** (`arrive`). Walking onto a hotspot that a location's `exits` names takes that map edge, but only if the hotspot's object is in the exit's `state`. Otherwise it's an ordinary `walk` interaction, which is how a locked door says "It's locked."
 
@@ -94,13 +103,29 @@ Three Streamlit habits are worth knowing before editing `app.py`:
 
 The Game page's **Interface** section shows only the settings the chosen style uses, and writes only those (`spec.interface` gives that stored form). Icons are kept when the style changes, so switching back finds them again.
 
-`PNC_PROJECTS` points the editor at a different projects folder; the UI tests use a temporary one.
+**Naming new things.** Projects, locations, objects, characters, marks and dialogue nodes are all added by typing a name, then pressing Enter or the button. `spec.make_id` makes the id from it ("Living Room" → `living_room`). A project's name becomes its title, and an entity's becomes its display name. When a name can't be used (nothing in it, or the id is taken), the editor says so and keeps the text so it can be fixed; nothing fails silently.
 
-The location page is the layer editor. Clicking the image either drops a mark (named, anchored at the feet) or adds polygon points. Polygons fill into the walkway, the depth mask (as a far-to-near gradient), an object's colour in the object mask, or a walk-behind. The preview always shows the walkway faintly, and draws characters at their marks at the scale the depth mask gives them there. Layers can also be painted elsewhere and uploaded. Clicks come from `streamlit-image-coordinates`. If richer drawing is ever needed, swap that one call for a canvas component, or move this page to NiceGUI.
+### Where things live
+
+Nothing is ever written inside `editor/`, so the editor works the same from a source checkout or an installed package, whose folder may be read-only. `config.py` decides where everything goes:
+
+| What | Where | Set by |
+| --- | --- | --- |
+| Settings (`settings.yaml`: the folders below, and the AI backends) | The user's config folder: `%APPDATA%/Point and Click Maker` on Windows, `~/Library/Application Support/Point and Click Maker` on macOS, `$XDG_CONFIG_HOME/point-and-click-maker` (or `~/.config/...`) elsewhere | `PNC_CONFIG` overrides the folder |
+| Projects, the games being made | `Documents/Point and Click Maker/projects` | The Settings page; `PNC_PROJECTS` overrides it for one run |
+| Exports, the playable zips | `Documents/Point and Click Maker/exports` | The Settings page |
+| AI models | `Documents/Point and Click Maker/models` | The Settings page (and each model's own path on the AI assets page) |
+| Examples (the demo) | `editor/examples`, shipped with the editor and only ever read | — |
+
+The **Settings** page is there even when there's no project yet, and a first run opens on it. It has the three folders, the examples (copying one makes a new project in the projects folder, renamed if its name is taken), and a one-click move for projects still in `editor/projects`, where they used to be kept. AI settings that were in `editor/ai.yaml` are still read until they're saved again, into `settings.yaml`.
+
+The tests never touch the real settings or Documents: `conftest.py` gives every test its own `PNC_CONFIG` and home folder, and the UI tests put their projects in a temporary folder through `PNC_PROJECTS`.
+
+The location page is the layer editor. Its controls sit beside the picture, so naming a mark or filling a polygon happens in view of it; uploads are tucked into an expander. The picture is stretched to its column, and clicks are scaled back to the image's own pixels. Clicking either drops a mark (named, anchored at the feet) or adds polygon points. Polygons fill into the walkway, the depth mask (as a far-to-near gradient), an object's colour in the object mask, or a walk-behind. The preview draws the room's objects in their starting state and its characters at their marks (at the scale the depth mask gives them there), all in the engine's draw order. An object with an "only here if…" condition is drawn faded, so it can still be seen and placed. The walkway always shows faintly. Below the tables, **Objects in this room** lists the placed objects in draw order: each one's layer, ▲/▼ to move it back or forward in the list, and its "only here if…" conditions. The hotspot table carries those over when it rewrites its rows. Layers can also be painted elsewhere and uploaded. Clicks come from `streamlit-image-coordinates`. If richer drawing is ever needed, swap that one call for a canvas component, or move this page to NiceGUI.
 
 ### The Check
 
-`check.check(P)` is tier 1. It runs schema conformance per file, then (only if shapes are right) every reference: flags, objects, items, characters, locations, marks (within the right location), edges, dialogue nodes, string IDs in every language, and asset files. It also checks marks on the walkway, layer sizes, and that each hotspot's colour is actually painted in the object mask (if not, the hotspot can't be clicked, so it's an error). It warns about unused assets, flags, strings and untakeable edges.
+`check.check(P)` is tier 1. It runs schema conformance per file, then (only if shapes are right) every reference: flags, objects, items, characters, locations, marks (within the right location), edges, dialogue nodes, string IDs in every language, and asset files. It also checks marks on the walkway and layer sizes. It checks that every object can be clicked in every state it can be seen in: if its colour isn't painted in the object mask, each such state needs a sprite, and a missing one is an error. Placement conditions are reference-checked like any other condition. It warns about unused assets, flags, strings and untakeable edges.
 
 `check.solve(P)` is tier 2: a breadth-first search over abstract states. A state is room, inventory, flags, object states, NPC rooms, open conversation, and only the said-lines some condition or `once` option reads; player position is ignored. It reports whether the ending flag is reachable (with the shortest route), unreachable rooms, unobtainable items, and softlocks. A softlock is a reachable state that can't reach the ending; walking the graph backwards from ending states finds them, and the report includes a shortest repro path. `max_states` caps the search on big games. A capped search counts the states it never expanded as possibly fine, so the softlocks it reports are certain ones, and not finding the ending is only a warning.
 
@@ -108,7 +133,7 @@ The location page is the layer editor. Clicking the image either drops a mark (n
 
 ### AI
 
-`ai.py` keeps every model optional and behind one function per feature, chosen in `editor/ai.yaml` (edited on the AI assets page): `none`, `onnx` (local, via ONNX Runtime), or `remote` (HTTP). Libraries are imported only when a feature is used.
+`ai.py` keeps every model optional and behind one function per feature, chosen in the `ai` section of the user's `settings.yaml` (edited on the AI assets page; see [Where things live](#where-things-live)): `none`, `onnx` (local, via ONNX Runtime), or `remote` (HTTP). Libraries are imported only when a feature is used.
 
 **Rule authoring** (`author`). The model receives a context slice (ID lists plus only the sheets the intent mentions) and must answer in the patch schema. `onnxruntime-genai` guidance and OpenAI-style `json_schema` both constrain the output, with `add_rule` targets restricted to real IDs. Each patch is applied to a copy and run through the Check. New errors go back to the model for up to two repair passes before the user sees anything. An `ask` op becomes tappable options in the UI. Accepting a patch is one undo step.
 
@@ -120,7 +145,7 @@ The location page is the layer editor. Clicking the image either drops a mark (n
 
 ### Export and the bundle
 
-`spec.export` writes `editor/exports/<id>.zip` (release) or `<id>-dev.zip` (dev). `header.json` stays in the clear: spec version, game ID, an `encrypted` flag, and the file index. Every other file is stored uncompressed and, in release builds, encrypted on its own with AES-256-GCM as `nonce(12) + ciphertext + tag`, so the engine can stream single assets. The key is generated once per game into `<project>/.key` (gitignored) and compiled into that game's engine build. `engine/build.rs` stores it XOR-masked with random bytes, so it isn't in the binary as a plain hex string. This deters casual extraction; a determined user can still pull the key out with a debugger.
+`spec.export` writes `<id>.zip` (release) or `<id>-dev.zip` (dev) into the exports folder. `header.json` stays in the clear: spec version, game ID, an `encrypted` flag, and the file index. Every other file is stored uncompressed and, in release builds, encrypted on its own with AES-256-GCM as `nonce(12) + ciphertext + tag`, so the engine can stream single assets. The key is generated once per game into `<project>/.key` (gitignored) and compiled into that game's engine build. `engine/build.rs` stores it XOR-masked with random bytes, so it isn't in the binary as a plain hex string. This deters casual extraction; a determined user can still pull the key out with a debugger.
 
 
 ## Engine
@@ -142,7 +167,7 @@ Character sheets and inventory icons load once at startup. Rooms stream:
 
 - On entering a room, `room_changed` keeps it plus its neighbours on the map, drops every other room's textures, and sends missing rooms to the loader thread.
 - The thread reads, decrypts and decodes the images, and cuts walk-behinds out of the background.
-- `pump` uploads at most one room per frame to the GPU and bakes the walk grid. macroquad's own async loading doesn't truly run in the background on desktop, hence the thread.
+- `pump` uploads at most one room per frame to the GPU and bakes the walk grid. It keeps CPU copies of the object sprites, which are small, so clicks can test their pixels. macroquad's own async loading doesn't truly run in the background on desktop, hence the thread.
 
 While the new room isn't ready, the screen stays faded and the queue waits.
 
@@ -150,9 +175,9 @@ While the new room isn't ready, the screen stays faded and the queue waits.
 
 The walkway mask is baked into a 4-pixel grid. Paths are a breadth-first search to the walkable cell nearest the click, then string-pulled into straight segments. Depth scales both size and speed.
 
-Each frame draws the background, then objects, characters and walk-behinds sorted by baseline (sprite bottom, feet, or the walk-behind's `baseline`).
+Each frame draws the background, then `scene()`: the objects that are here, the characters and the walk-behinds, in the draw order described under [Game semantics](#game-semantics). The sort key is layer, then (in the depth layer) bottom edge, then listed order. The bottom edge is the sprite's bottom, the feet, or the walk-behind's `baseline`. On a tie, objects come before characters, and characters before walk-behinds.
 
-Clicks hit NPCs by their sprite box first, then hotspots by the object mask's colour at that pixel. Everything is drawn at the game's own resolution, with the interface's panel (if it has one) underneath, scaled and letterboxed into the window. `View` is that transform.
+`target_at` hit-tests the same list front to back, then falls back to the mask colour for objects painted into the background. Walk-behinds never take clicks, and neither does the player. Locations keep their objects in an `IndexMap`, so the listed order survives loading. Everything is drawn at the game's own resolution, with the interface's panel (if it has one) underneath, scaled and letterboxed into the window. `View` is that transform.
 
 ### The interface
 
@@ -177,11 +202,28 @@ Both styles end in the same calls (`click_target`, `logic::click_item`, `logic::
 
 ### Controls, audio and saves
 
-The verbs come from `game.yaml` verbs, with labels from `verb_<verb>` strings. Inventory clicks follow `click_item` (see [Game semantics](#game-semantics)). A click skips the current line. Other controls: F5 saves, F9 loads (dropping whatever was in progress, including a room change), `[` and `]` change music volume, Esc quits.
+The verbs come from `game.yaml` verbs, with labels from `verb_<verb>` strings. Inventory clicks follow `click_item` (see [Game semantics](#game-semantics)). A click skips the current line. `[` and `]` change music volume.
 
 Music streams through kira with crossfades on a music bus; effects and voice lines play on an sfx bus. An audio thread reads and decrypts every sound, and decodes effects in full, so the frame loop never waits on audio. Decoded effects are kept for replays; voice lines aren't, since each is said about once.
 
-Saves are JSON at `./saves/<game id>.sav`, encrypted (and so tamper-checked) with the game key in release builds.
+### The menu and saving
+
+**Esc**, or the ☰ button in the scene's top-right corner, opens the menu (`ui::Pause`) and pauses the game: the main loop stops calling `update()`, so no time passes. Its pages:
+- **main:** Resume, Save game, Load game, Quit;
+- **save:** six numbered slots;
+- **load:** Autosave, Quicksave and the six slots, each showing its room and how long ago it was saved.
+
+Esc or a right-click goes back a page, then closes the menu.
+
+- **Saving** waits until the game is waiting for the player (`can_save`): no line, cutscene, conversation or room change under way. A save holds the state, not whatever was mid-way. Until then Save game is greyed out with a note saying why, and F5 says so instead of failing silently.
+- **Autosave** is written after entering a room, once its enter rule (any cutscene) has played out. **F5** quicksaves, and **F9** quickloads.
+- **Loading** (`load_slot`) drops everything under way, including a room change, and puts the state back.
+
+A save file is `spec::Save`: the state manifest plus `saved_at` (seconds since 1970), as JSON. Release builds encrypt it with the game key, so it's also tamper-checked. On loading, `migrate` brings it up to date with the game, so saves survive game updates. A save from before slots (a bare state) still loads.
+
+Saves go in `<app data>/PointAndClick/<game id>/saves/<slot>.sav` (`spec::saves_dir`): `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` elsewhere. `PNC_SAVES` overrides it. Never next to the game, which may be installed read-only. At startup, an old `./saves/<game id>.sav` is copied in as the quicksave.
+
+The menu's words, and the engine's own messages ("Saved."), can be translated: a game that defines `ui_resume`, `ui_saved` and the rest in its strings gets its own text, and English otherwise. `spec.RESERVED` lists them, so the Check doesn't flag them as unused.
 
 
 ## Common changes
@@ -210,16 +252,25 @@ cd engine && cargo test         # engine side
 ```
 
 - **`editor/tests/test_check.py`** runs the Check on the demo (clean, seven-step route), then on copies broken one way each, and expects the error that names the problem. The broken copies cover a typo'd flag, a mark off the walkway, missing text, an unknown field, a misplaced item-on-item rule, a bad dialogue `goto`, an unpainted hotspot, a softlock and an unreachable ending. It also checks that a capped search reports no false errors, and that spec files round-trip as UTF-8. Every copy is edited in memory; the demo on disk is never changed.
-- **The parity scenarios** (`tests/parity/scenarios.yaml`) are move lists in the solver's own move labels, plus the state they must end in. `editor/tests/test_parity.py` plays each through `check.moves`, so every move has to be one the solver offers. `engine/src/tests.rs` plays each through the functions `input()` uses (`click_item`, `click_target`, `choose`), with time passing through the real `update()`. Only the window side is stubbed there: rooms "load" with no textures and a fully walkable grid, and there's no audio. `tests/parity/projects/workshop` is a one-room, YAML-only game made to exercise the trickier semantics.
-- **The interface tests** (also in `engine/src/tests.rs`) play the demo through `ui::input` itself, with a scripted mouse over the rooms' real masks. The ring style takes the key from the ring, uses it from the inventory on the door, and picks a dialogue option at the bottom. The bar does the same in each of `words`, `icons` and `captioned`. So layout and hit-testing are covered as well as the rules.
-- **`editor/tests/test_app.py`** runs the editor headlessly with Streamlit's AppTest, against copies of the demo and the workshop in a temporary folder. It checks that every page renders and that viewing pages changes no file, even for a sparse project. It also checks that Undo steps back one edit at a time, and that the Interface section writes only the chosen style's settings. AppTest can't click the location page's image, a custom component, so the layer editor still needs a browser test.
+- **The parity scenarios** (`tests/parity/scenarios.yaml`) are move lists in the solver's own move labels, plus the state they must end in, and optionally moves that must then be `blocked` (such as taking an object that isn't there yet). `editor/tests/test_parity.py` plays each through `check.moves`, so every move has to be one the solver offers. `engine/src/tests.rs` plays each through the functions `input()` uses (`click_item`, `click_target`, `choose`), with time passing through the real `update()`. Only the window side is stubbed there: rooms "load" with no textures and a fully walkable grid, and there's no audio. `tests/parity/projects/workshop` is a one-room, YAML-only game made to exercise the trickier semantics.
+- **The interface tests** (also in `engine/src/tests.rs`) play the demo through `ui::input` itself, with a scripted mouse over the rooms' real masks. The ring style takes the key from the ring, uses it from the inventory on the door, and picks a dialogue option at the bottom. The bar does the same in each of `words`, `icons` and `captioned`. So layout and hit-testing are covered as well as the rules. Another test sets the demo's cake down over the key. It checks that the draw order and the click follow the cake's layer, and that a hidden cake lets the key behind it be clicked.
+- **The saving tests** (also in `engine/src/tests.rs`) use the menu with the same scripted mouse. They save to a slot, change things, and load the slot back. They also check that saving waits out a conversation, that entering a room autosaves, and that a save from before slots still loads. Each test uses a temporary saves folder; the other tests have none, so they never write saves.
+- **`editor/tests/test_config.py`** checks where the editor keeps things. Nothing defaults to inside the editor, folder settings persist and clear, `PNC_PROJECTS` overrides without changing the setting, copying an example never overwrites, and moving old projects renames on a clash. AI settings live in `settings.yaml`. `test_app.py` also drives the Settings page from a first run: it sets the projects folder, copies the demo, and lands in it.
+- **`editor/tests/test_app.py`** runs the editor headlessly with Streamlit's AppTest, against copies of the demo and the workshop in a temporary folder. It checks that every page renders and that viewing pages changes no file, even for a sparse project. It also checks that Undo steps back one edit at a time, and that the Interface section writes only the chosen style's settings. It creates a project and adds a location from ordinary names (checking that every page of the new, empty project works), and checks that unusable or taken names get a message. AppTest runs the script without rendering it, so it can't see layouts or click the location page's picture, a custom component.
+- **`editor/tests/test_browser.py`** covers that part. It serves the editor for real on a copy of the demo, and drives it with Playwright through the Edge that ships with Windows (falling back to Chrome, or to Playwright's own Chromium after `playwright install chromium`). It's skipped where none of these is available. It checks that:
+  - every page renders without an exception or a browser error;
+  - the preview draws objects (by reading the cake's pixels);
+  - clicking the picture places a mark, with the name box beside the picture rather than under it;
+  - three clicks and Fill paint a polygon into the walkway.
+
+  One environment trap: if `SSLKEYLOGFILE` is set, some Windows Python builds (uv's among them) abort as soon as anything creates an SSL context, so the test removes it from the server's environment.
 
 When the two apps disagree about a scenario, one of the suites fails. Each semantic fix above was checked by reintroducing the old behaviour and watching a test fail.
 
 
 ## Status and known gaps
 
-**Verified.** The engine builds with no warnings (rustc 1.93) and runs the demo from both dev and release (encrypted) exports. Both test suites pass. Each interface style was also checked by eye from autoplay screenshots. Not yet tested: the location page's click-to-draw image (it needs a browser) and the real AI backends.
+**Verified.** The engine builds with no warnings (rustc 1.93) and runs the demo from both dev and release (encrypted) exports. Both test suites pass. Each interface style was also checked by eye from autoplay screenshots, and the editor from browser screenshots. Not yet tested: the real AI backends.
 
 **Other limits:**
 
@@ -234,4 +285,4 @@ When the two apps disagree about a scenario, one of the suites fails. Each seman
 - **Conditions:** typed flag/state/inventory/location/said conditions, AND-ed. There's no expression language yet.
 - **Verb UI:** chosen per game in `game.yaml`: a verb bar (words, icons or captioned icons) or a verb ring with a right-click inventory.
 - **Resolution:** set per game in `game.yaml`.
-- **Save location:** `./saves` next to where the engine runs. A per-platform app-data directory is the obvious next step.
+- **Save location:** the player's app-data folder, per game (see [The menu and saving](#the-menu-and-saving)).

@@ -1,2 +1,3 @@
 -r requirements.txt
 pytest>=8
+playwright>=1.49     # browser tests drive Windows' own Edge; elsewhere: playwright install chromium

@@ -28,9 +28,16 @@ pub fn ok(st: &State, conds: &Vec<Cond>) -> bool {
     true
 }
 
-/// Objects are drawn and clickable unless they're in the "gone" state.
+/// An object in the "gone" state isn't anywhere (it's how picked-up items leave the room).
 pub fn active(g: &G, id: &str) -> bool {
     g.st.objects.get(id).map(|s| s != "gone").unwrap_or(true)
+}
+
+/// An object is here in the current location (drawn, and clickable) when it's placed here, isn't
+/// gone, and its placement's condition holds. check.py's solver uses the same rule.
+pub fn shown(g: &G, id: &str) -> bool {
+    let placed = g.spec.locations.get(&g.st.location).and_then(|l| l.hotspots.get(id));
+    placed.is_some_and(|h| active(g, id) && ok(&g.st, &h.cond))
 }
 
 /// A target's rules and fallback lines (objects and characters both have them).

@@ -196,8 +196,16 @@ fn ring_verb_at(g: &G, c: Vec2, p: Vec2) -> String {
 
 // ---------------- input ----------------
 
-/// This frame's mouse, handled the way the game's style does it.
+/// This frame's mouse: the menu takes it while it's open (and the ☰ button opens it); otherwise
+/// it's handled the way the game's style does it.
 pub fn input(g: &mut G, m: Mouse) {
+    if g.pause.is_some() {
+        return input_menu(g, m);
+    }
+    if m.pressed && menu_button(g).contains(m.pos) {
+        g.press = None;
+        return toggle_menu(g);
+    }
     if g.ended {
         return;
     }
@@ -531,6 +539,222 @@ fn draw_ring(g: &G, p: &Press, m: Mouse, v: View) {
     let below = c.y + r + SLOT_R + 18.0;
     let y = if below <= h - 2.0 { below } else { c.y - r - SLOT_R - 8.0 };
     text_at(&what, (c.x - tw / 2.0).clamp(4.0, (w - tw - 4.0).max(4.0)), y, 14.0, LABEL, v);
+}
+
+// ---------------- the menu (Esc, or the ☰ button in the corner) ----------------
+
+/// The open menu: which page is showing ("main", "save" or "load"), a note under it (like "Saved
+/// to slot 2"), and the save slots as last read: (slot, Some((room name, saved at)) or None).
+/// The game is paused while it's open.
+pub struct Pause {
+    pub page: &'static str,
+    pub note: String,
+    pub slots: Vec<(String, Option<(String, u64)>)>,
+}
+
+/// The numbered slots; there's also "auto" (written on entering a room) and "quick" (F5, F9).
+const SLOTS: [&str; 6] = ["1", "2", "3", "4", "5", "6"];
+
+/// Text the engine shows on its own account (ui_resume, ui_saved…): the game's string if it has
+/// one, so it can be translated, else the English.
+pub fn text_or(g: &G, id: &str, english: &str) -> String {
+    g.spec.strings.get(id).cloned().unwrap_or_else(|| english.to_string())
+}
+
+/// Esc: open the menu; on one of its inner pages, go back; on its main page, close it.
+pub fn toggle_menu(g: &mut G) {
+    match g.pause.as_mut() {
+        None => {
+            g.press = None;
+            g.pause = Some(Pause { page: "main", note: String::new(), slots: vec![] });
+        }
+        Some(p) if p.page != "main" => {
+            p.page = "main";
+            p.note.clear();
+        }
+        Some(_) => g.pause = None,
+    }
+}
+
+/// The ☰ button that opens the menu, in the top-right corner of the scene.
+pub fn menu_button(g: &G) -> Rect {
+    Rect::new(res(g).0 - 22.0, 4.0, 18.0, 16.0)
+}
+
+fn room_name(g: &G, loc: &str) -> String {
+    match g.spec.locations.get(loc) {
+        Some(l) if !l.name.is_empty() => text(g, &l.name),
+        _ => loc.to_string(),
+    }
+}
+
+/// Read every slot's room and save time, for the menu to show.
+fn refresh_slots(g: &mut G) {
+    let slots = ["auto", "quick"].iter().chain(SLOTS.iter()).map(|s| {
+        let info = crate::spec::read_save(&g.saves, s, &g.spec, &g.key).map(|(st, at)| (room_name(g, &st.location), at));
+        (s.to_string(), info)
+    });
+    let slots = slots.collect();
+    if let Some(p) = g.pause.as_mut() {
+        p.slots = slots;
+    }
+}
+
+fn slot_info<'a>(g: &'a G, slot: &str) -> Option<&'a (String, u64)> {
+    g.pause.as_ref()?.slots.iter().find(|(s, _)| s == slot)?.1.as_ref()
+}
+
+/// The buttons on the menu page showing, top to bottom: (rect, action). Actions are "resume",
+/// "save", "load", "quit", "back", "save:<slot>" and "load:<slot>".
+pub fn menu_buttons(g: &G) -> Vec<(Rect, String)> {
+    let Some(p) = &g.pause else { return vec![] };
+    let actions: Vec<String> = match p.page {
+        "save" => SLOTS.iter().map(|s| format!("save:{s}")).chain(["back".to_string()]).collect(),
+        "load" => ["auto", "quick"].iter().chain(SLOTS.iter()).map(|s| format!("load:{s}")).chain(["back".to_string()]).collect(),
+        _ => ["resume", "save", "load", "quit"].iter().map(|s| s.to_string()).collect(),
+    };
+    let (w, h) = (res(g).0, res(g).1 + ui_h(g));
+    let (bw, bh, gap) = (if p.page == "main" { 170.0 } else { 320.0 }, 20.0, 4.0);
+    let top = (h - actions.len() as f32 * (bh + gap)) / 2.0 + 8.0;
+    actions.into_iter().enumerate().map(|(i, a)| (Rect::new((w - bw) / 2.0, top + i as f32 * (bh + gap), bw, bh), a)).collect()
+}
+
+/// Whether a menu action can be taken now: saving waits until the game is waiting for the player,
+/// and an empty slot can't be loaded.
+fn enabled(g: &G, action: &str) -> bool {
+    match action.split_once(':') {
+        Some(("load", slot)) => slot_info(g, slot).is_some(),
+        Some(_) => crate::can_save(g),
+        None => action != "save" || crate::can_save(g),
+    }
+}
+
+/// Clicks in the menu. A right-click goes back a page, like Esc.
+fn input_menu(g: &mut G, m: Mouse) {
+    if m.right {
+        return toggle_menu(g);
+    }
+    if !m.pressed {
+        return;
+    }
+    let Some((_, action)) = menu_buttons(g).into_iter().find(|(r, _)| r.contains(m.pos)) else { return };
+    if !enabled(g, &action) {
+        return;
+    }
+    match action.split_once(':') {
+        Some(("save", slot)) => {
+            let saved = crate::save_slot(g, slot);
+            refresh_slots(g);
+            let note = if saved {
+                format!("{} {slot}.", text_or(g, "ui_saved_to", "Saved to slot"))
+            } else {
+                text_or(g, "ui_save_failed", "The game couldn't be saved.")
+            };
+            if let Some(p) = g.pause.as_mut() {
+                p.note = note;
+            }
+        }
+        Some((_, slot)) => {
+            crate::load_slot(g, slot); // closes the menu
+        }
+        None => match action.as_str() {
+            "resume" => g.pause = None,
+            "quit" => std::process::exit(0),
+            "back" => toggle_menu(g),
+            page => {
+                refresh_slots(g);
+                if let Some(p) = g.pause.as_mut() {
+                    p.page = if page == "save" { "save" } else { "load" };
+                    p.note.clear();
+                }
+            }
+        },
+    }
+}
+
+/// How long ago a save was made, roughly. Saves from before slots don't know ("").
+fn ago(at: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let s = now.saturating_sub(at);
+    match s {
+        _ if at == 0 => String::new(),
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86399 => format!("{} h ago", s / 3600),
+        86400..=172799 => "yesterday".to_string(),
+        _ => format!("{} days ago", s / 86400),
+    }
+}
+
+/// A menu button's text: (label, detail on the right, like "Street - 5 min ago").
+fn menu_label(g: &G, action: &str) -> (String, String) {
+    let Some((_, slot)) = action.split_once(':') else {
+        let label = match action {
+            "resume" => text_or(g, "ui_resume", "Resume"),
+            "save" => text_or(g, "ui_save", "Save game"),
+            "load" => text_or(g, "ui_load", "Load game"),
+            "quit" => text_or(g, "ui_quit", "Quit"),
+            _ => text_or(g, "ui_back", "Back"),
+        };
+        return (label, String::new());
+    };
+    let name = match slot {
+        "auto" => text_or(g, "ui_autosave", "Autosave"),
+        "quick" => text_or(g, "ui_quicksave", "Quicksave"),
+        n => format!("{} {n}", text_or(g, "ui_slot", "Slot")),
+    };
+    let detail = match slot_info(g, slot) {
+        Some((room, at)) if *at > 0 => format!("{room} - {}", ago(*at)),
+        Some((room, _)) => room.clone(),
+        None => text_or(g, "ui_empty", "empty"),
+    };
+    (name, detail)
+}
+
+/// While playing, the ☰ button; with the menu open, the menu over the dimmed, paused game.
+pub fn draw_menu(g: &G, m: Mouse, v: View) {
+    let Some(p) = &g.pause else {
+        let r = menu_button(g);
+        let lit = r.contains(m.pos);
+        box_at(r, Color::new(0.0, 0.0, 0.0, if lit { 0.6 } else { 0.35 }), v);
+        for i in 0..3 {
+            box_at(Rect::new(r.x + 4.0, r.y + 4.0 + i as f32 * 3.5, r.w - 8.0, 1.5), if lit { WHITE } else { DIM }, v);
+        }
+        return;
+    };
+    let (w, h) = (res(g).0, res(g).1 + ui_h(g));
+    box_at(Rect::new(0.0, 0.0, w, h), Color::new(0.0, 0.0, 0.0, 0.6), v);
+    let buttons = menu_buttons(g);
+    let (first, last) = (buttons[0].0, buttons[buttons.len() - 1].0);
+    let frame = Rect::new(first.x - 12.0, first.y - 30.0, first.w + 24.0, last.bottom() - first.y + 42.0);
+    box_at(frame, panel(), v);
+    draw_rectangle_lines(v.1 + frame.x * v.0, v.2 + frame.y * v.0, frame.w * v.0, frame.h * v.0, 2.0, Color::from_rgba(90, 84, 120, 255));
+    let title = match p.page {
+        "save" => text_or(g, "ui_save_title", "Save game"),
+        "load" => text_or(g, "ui_load_title", "Load game"),
+        _ => text_or(g, "ui_paused", "Paused"),
+    };
+    text_at(&title, (w - text_w(&title, 16.0)) / 2.0, first.y - 10.0, 16.0, WHITE, v);
+    for (r, action) in &buttons {
+        let (on, hover) = (enabled(g, action), r.contains(m.pos));
+        box_at(*r, if on && hover { Color::from_rgba(70, 64, 100, 255) } else { slot() }, v);
+        let colour = if !on { Color::new(0.5, 0.5, 0.55, 1.0) } else if hover { YELLOW } else { WHITE };
+        let (label, detail) = menu_label(g, action);
+        text_at(&label, r.x + 8.0, r.y + 14.0, 14.0, colour, v);
+        if !detail.is_empty() {
+            text_at(&detail, r.right() - 8.0 - text_w(&detail, 12.0), r.y + 14.0, 12.0, if on { DIM } else { colour }, v);
+        }
+    }
+    let note = if !p.note.is_empty() {
+        p.note.clone()
+    } else if p.page == "main" && !crate::can_save(g) {
+        text_or(g, "ui_cant_save", "You can't save in the middle of something.")
+    } else {
+        String::new()
+    };
+    if !note.is_empty() {
+        text_at(&note, (w - text_w(&note, 13.0)) / 2.0, frame.bottom() + 16.0, 13.0, LABEL, v);
+    }
 }
 
 // ---------------- autoplay (a dev tool) ----------------

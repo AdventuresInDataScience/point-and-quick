@@ -6,7 +6,7 @@ title: str_title
 lang: en
 player: player
 verbs: [walk, look, talk, use, take]
-flags: {lamp_on: false, rope_hooked: false, noticed: false, cat_awake: false, petted: false}
+flags: {lamp_on: false, rope_hooked: false, noticed: false, cat_awake: false, petted: false, drawer_open: false}
 ending: petted
 start:
   location: hall

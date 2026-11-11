@@ -21,6 +21,8 @@ struct Scenario {
     moves: Vec<String>,
     #[serde(default)]
     expect: Expect,
+    #[serde(default)]
+    blocked: Vec<String>, // moves that mustn't be possible once the moves are made
 }
 
 #[derive(Deserialize, Default)]
@@ -38,11 +40,14 @@ fn parity_dir() -> PathBuf {
 }
 
 /// Zip a project folder the way the editor's dev export does: header.json plus every file, stored.
+/// Each bundle gets its own file, since tests run in parallel and delete theirs when done.
 fn bundle(project: &Path, name: &str) -> String {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let mut files = vec![];
     collect(project, project, &mut files);
     files.sort();
-    let out = std::env::temp_dir().join(format!("pnc-parity-{name}-{}.zip", std::process::id()));
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let out = std::env::temp_dir().join(format!("pnc-parity-{name}-{}-{n}.zip", std::process::id()));
     let mut z = zip::ZipWriter::new(std::fs::File::create(&out).unwrap());
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let header = serde_json::json!({"spec_version": spec::SPEC_VERSION, "game": name, "encrypted": false, "files": files});
@@ -72,7 +77,7 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) {
 
 /// A room that counts as loaded without a GPU: no textures, and every cell walkable.
 fn stub_room() -> Room {
-    Room { tex: HashMap::new(), masks: HashMap::new(), walk: vec![true; 160 * 90], gw: 160, gh: 90 }
+    Room { tex: HashMap::new(), masks: HashMap::new(), sprites: HashMap::new(), walk: vec![true; 160 * 90], gw: 160, gh: 90 }
 }
 
 /// Run frames until the game waits for the player: lines said, walks and fades done, queue empty,
@@ -90,45 +95,58 @@ fn settle(g: &mut G) {
     panic!("the game never settled");
 }
 
-/// The target is somewhere the player could click: an NPC standing here, or an active hotspot.
-/// (Whether its colour is painted in the object mask is the Check's job.)
-fn assert_clickable(g: &G, target: &str) {
+/// The target is somewhere the player could click: an NPC standing here, or an object that's here.
+/// (That it has a sprite or a painted colour to click on is the Check's job.)
+fn clickable(g: &G, target: &str) -> bool {
     let npc = g.pos.contains_key(target) && logic::npcs_here(g).iter().any(|(c, _, _)| c == target);
-    let hot = g.spec.locations[&g.st.location].hotspots.contains_key(target) && logic::active(g, target);
-    assert!(npc || hot, "'{target}' isn't there to click in {}", g.st.location);
+    npc || logic::shown(g, target)
 }
 
-fn assert_carried(g: &G, item: &str) {
-    assert!(logic::has(&g.st.inventory, item), "'{item}' isn't carried");
+fn carried(g: &G, item: &str) -> bool {
+    logic::has(&g.st.inventory, item)
 }
 
-/// One move, in the solver's label format (see scenarios.yaml), made the way a player would.
-fn play(g: &mut G, mv: &str) {
+/// Whether a move (in the solver's label format, see scenarios.yaml) could be made right now.
+/// In a conversation, only its options can.
+fn possible(g: &G, mv: &str) -> bool {
     if let Some(line) = mv.strip_prefix("say '").and_then(|m| m.strip_suffix('\'')) {
-        let o = logic::options(g).into_iter().find(|o| o.line == line);
-        let o = o.unwrap_or_else(|| panic!("the option '{line}' isn't offered"));
+        return logic::options(g).iter().any(|o| o.line == line);
+    }
+    if g.menu.is_some() {
+        return false;
+    }
+    if let Some(rest) = mv.strip_suffix(" (inventory)") {
+        return carried(g, rest.split_once(' ').unwrap().1);
+    }
+    if let Some((item, target)) = mv.strip_prefix("use ").and_then(|m| m.split_once(" on ")) {
+        return carried(g, item) && (carried(g, target) || clickable(g, target));
+    }
+    clickable(g, mv.split_once(' ').unwrap().1)
+}
+
+/// One move, in the solver's label format, made the way a player would.
+fn play(g: &mut G, mv: &str) {
+    assert!(possible(g, mv), "'{mv}' isn't possible in {}", g.st.location);
+    if let Some(line) = mv.strip_prefix("say '").and_then(|m| m.strip_suffix('\'')) {
+        let o = logic::options(g).into_iter().find(|o| o.line == line).unwrap();
         logic::choose(g, &o);
     } else if let Some(rest) = mv.strip_suffix(" (inventory)") {
         let (verb, it) = rest.split_once(' ').unwrap();
-        assert_carried(g, it);
         g.verb = verb.to_string();
         logic::click_item(g, verb, it);
         if verb == "use" {
             logic::click_item(g, verb, it); // picked it; clicking it again uses it on its own
         }
     } else if let Some((item, target)) = mv.strip_prefix("use ").and_then(|m| m.split_once(" on ")) {
-        assert_carried(g, item);
         g.verb = "use".to_string();
         logic::click_item(g, "use", item); // pick the item, then click what to use it on
-        if logic::has(&g.st.inventory, target) {
+        if carried(g, target) {
             logic::click_item(g, "use", target);
         } else {
-            assert_clickable(g, target);
             click_target(g, "use", target);
         }
     } else {
         let (verb, target) = mv.split_once(' ').unwrap();
-        assert_clickable(g, target);
         g.verb = verb.to_string();
         click_target(g, verb, target);
     }
@@ -172,6 +190,9 @@ fn parity_scenarios() {
             play(&mut g, mv);
         }
         assert_state(&g, &s.expect);
+        for mv in &s.blocked {
+            assert!(!possible(&g, mv), "'{mv}' should be blocked");
+        }
         std::fs::remove_file(zip).ok();
     }
 }
@@ -181,22 +202,30 @@ fn parity_scenarios() {
 const KEY: Vec2 = Vec2::new(255.0, 300.0); // inside the key's hotspot in the demo's street
 const DOOR: Vec2 = Vec2::new(425.0, 220.0); // inside the door's
 
-/// A room with its real masks (decoded on the CPU; no textures), so clicks hit what a player's would.
+/// A room with its real masks and object sprites (decoded on the CPU; no textures), so clicks hit
+/// what a player's would.
 fn real_room(g: &G, loc: &str) -> Room {
     let l = &g.spec.locations[loc];
+    let decode = |path: &str| Image::from_file_with_format(&spec::read(&g.zip, path, &g.key), None).unwrap();
     let mut masks = HashMap::new();
     for (name, path) in [("walk", &l.walkway), ("objects", &l.objects_mask), ("depth", &l.depth)] {
         if !path.is_empty() {
-            masks.insert(name.to_string(), Image::from_file_with_format(&spec::read(&g.zip, path, &g.key), None).unwrap());
+            masks.insert(name.to_string(), decode(path));
+        }
+    }
+    let mut sprites = HashMap::new();
+    for id in l.hotspots.keys() {
+        for sprite in g.spec.objects[id].states.values().filter(|s| !s.is_empty()) {
+            sprites.insert(sprite.clone(), decode(sprite));
         }
     }
     let (walk, gw, gh) = bake_walk(&masks, vec2(res(g).0, res(g).1));
-    Room { tex: HashMap::new(), masks, walk, gw, gh }
+    Room { tex: HashMap::new(), masks, sprites, walk, gw, gh }
 }
 
 /// The demo in the given interface style, waiting in the street. (Delete g.zip when done.)
 fn demo(style: &str, labels: &str) -> G {
-    let zip = bundle(&parity_dir().join("../../editor/projects/demo"), &format!("ui-{style}-{labels}"));
+    let zip = bundle(&parity_dir().join("../../editor/examples/demo"), &format!("ui-{style}-{labels}"));
     let mut g = boot(&zip, false);
     g.spec.game.interface.style = style.to_string();
     g.spec.game.interface.labels = labels.to_string();
@@ -213,8 +242,10 @@ fn demo(style: &str, labels: &str) -> G {
 /// One frame: the mouse, then the frame's update, a thirtieth of a second on.
 fn frame(g: &mut G, m: ui::Mouse) {
     ui::input(g, m);
-    g.t += 1.0 / 30.0;
-    update(g, 1.0 / 30.0);
+    if g.pause.is_none() {
+        g.t += 1.0 / 30.0; // like the main loop: the menu pauses the game
+        update(g, 1.0 / 30.0);
+    }
 }
 
 fn at(p: Vec2) -> ui::Mouse {
@@ -294,4 +325,120 @@ fn bar_styles_play_like_a_player_would() {
         assert!(said(&g, "str_guard_not_on_watch"), "{labels}: using the key on the door");
         std::fs::remove_file(&g.zip).ok();
     }
+}
+
+#[test]
+fn clicks_follow_the_draw_order_and_skip_what_isnt_there() {
+    // put the cake down in the street, over the key (the key's spot is in its painted colour)
+    let mut g = demo("bar", "words");
+    let cake = spec::Hotspot { color: "#123456".into(), mark: "key_spot".into(), pos: [245.0, 292.0], ..Default::default() };
+    g.spec.locations.get_mut("street").unwrap().hotspots.insert("cake".into(), cake);
+    let room = real_room(&g, "street");
+    g.rooms.insert("street".into(), room);
+    let set = |g: &mut G, layer: &str, cond: Vec<spec::Cond>| {
+        let h = g.spec.locations.get_mut("street").unwrap().hotspots.get_mut("cake").unwrap();
+        h.layer = layer.to_string();
+        h.cond = cond;
+    };
+    let order = |g: &G| scene(g, &g.rooms["street"]).into_iter().filter(|x| x.0 == "object").map(|x| x.1).collect::<Vec<_>>();
+
+    // depth layer: the cake's bottom edge (308) is below the key's (307), so it's drawn in front
+    assert_eq!(order(&g), ["key", "cake"]);
+    assert_eq!(target_at(&g, KEY), "cake", "the front object gets the click, on its own pixels");
+    // back layer: behind everything, so the key's painted colour wins
+    set(&mut g, "back", vec![]);
+    assert_eq!(order(&g), ["cake", "key"]);
+    assert_eq!(target_at(&g, KEY), "key");
+    // in front again, but only there once the game's won: until then it isn't drawn or clicked
+    set(&mut g, "front", vec![spec::Cond::Flag { flag: "game_won".into(), is: true }]);
+    assert_eq!(order(&g), ["key"]);
+    assert_eq!(target_at(&g, KEY), "key", "a hidden object lets the one behind it be clicked");
+    g.st.flags.insert("game_won".into(), true);
+    assert_eq!(target_at(&g, KEY), "cake");
+    std::fs::remove_file(&g.zip).ok();
+}
+
+// ---------------- saving and loading, through the menu ----------------
+
+/// A fresh, empty saves folder for one test.
+fn temp_saves(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pnc-saves-{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    dir
+}
+
+fn click_menu(g: &mut G, action: &str) {
+    let r = ui::menu_buttons(g).into_iter().find(|(_, a)| a == action).map(|(r, _)| r);
+    click(g, r.unwrap_or_else(|| panic!("no '{action}' button on this page")).center());
+}
+
+fn page(g: &G) -> &'static str {
+    g.pause.as_ref().map(|p| p.page).unwrap_or("closed")
+}
+
+#[test]
+fn the_menu_saves_to_a_slot_and_loads_it_back() {
+    let mut g = demo("ring", "");
+    g.saves = temp_saves("menu");
+    ring_pick(&mut g, KEY, "take");
+    settle(&mut g);
+    assert!(carried(&g, "key"));
+
+    let corner = ui::menu_button(&g).center();
+    click(&mut g, corner); // the ☰ button opens the menu
+    assert_eq!(page(&g), "main");
+    click_menu(&mut g, "save");
+    click_menu(&mut g, "save:2");
+    assert!(g.saves.join("2.sav").is_file());
+    assert!(g.pause.as_ref().unwrap().note.contains("slot 2"));
+    click_menu(&mut g, "back");
+    click_menu(&mut g, "resume");
+    assert_eq!(page(&g), "closed");
+
+    // things change after saving...
+    g.st.inventory.clear();
+    g.st.flags.insert("guard_left".into(), true);
+    // ...and loading slot 2 puts them back
+    ui::toggle_menu(&mut g); // what Esc does
+    click_menu(&mut g, "load");
+    click_menu(&mut g, "load:5"); // empty: nothing happens
+    assert_eq!(page(&g), "load");
+    click_menu(&mut g, "load:2");
+    assert_eq!(page(&g), "closed");
+    assert!(carried(&g, "key") && !g.st.flags["guard_left"]);
+    std::fs::remove_dir_all(&g.saves).ok();
+    std::fs::remove_file(&g.zip).ok();
+}
+
+#[test]
+fn saving_waits_until_the_game_is_waiting_for_the_player() {
+    let mut g = demo("ring", "");
+    g.saves = temp_saves("waits");
+    let guard = g.pos["guard"] - vec2(0.0, 20.0);
+    ring_pick(&mut g, guard, "talk");
+    settle(&mut g); // in the conversation, its options showing
+    ui::toggle_menu(&mut g);
+    click_menu(&mut g, "save"); // greyed out: nothing happens
+    assert_eq!(page(&g), "main");
+    assert!(!can_save(&g) && !g.saves.exists());
+    std::fs::remove_file(&g.zip).ok();
+}
+
+#[test]
+fn entering_a_room_autosaves_and_old_saves_still_load() {
+    let mut g = demo("bar", "words");
+    g.saves = temp_saves("auto");
+    for mv in ["take key", "talk guard", "say 'str_opt_who'", "say 'str_opt_cat'", "use key on door", "walk door"] {
+        play(&mut g, mv);
+    }
+    let (st, at) = spec::read_save(&g.saves, "auto", &g.spec, &g.key).expect("an autosave");
+    assert!(st.location == "house" && at > 0);
+    // a save from before slots was a bare state; it still loads
+    let mut old = spec::new_state(&g.spec);
+    old.inventory = vec!["key".into()];
+    std::fs::write(g.saves.join("quick.sav"), serde_json::to_vec(&old).unwrap()).unwrap();
+    assert!(load_slot(&mut g, "quick"));
+    assert!(g.st.location == "street" && carried(&g, "key"));
+    std::fs::remove_dir_all(&g.saves).ok();
+    std::fs::remove_file(&g.zip).ok();
 }

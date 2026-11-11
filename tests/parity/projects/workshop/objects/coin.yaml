@@ -1,0 +1,9 @@
+# Only in the hall once the drawer is open: see its placement's condition in the hall's sheet.
+id: coin
+name: str_coin
+icon: objects/coin/icon.png
+state: here
+states: {here: "", gone: ""}
+rules:
+  - verb: take
+    do: [{type: give, item: coin}, {type: set_state, object: coin, state: gone}]

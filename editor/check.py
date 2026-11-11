@@ -123,8 +123,14 @@ def check(P):
         hot = l.get("hotspots", {})
         for o, h in hot.items():
             ref(w, "object", o); ref(w, "mark", h["mark"], i)
-            # the engine finds hotspots by their colour under the mouse, so an unpainted one can't be clicked
-            if h["color"].lower() not in colours: E(w, f"colour {h['color']} for '{o}' isn't painted in the object mask, so it can't be clicked")
+            # An object is clicked on its sprite's pixels or its colour in the object mask. Without the
+            # colour painted, every state it can be seen in needs a sprite, or it can't be clicked then.
+            # (That guarantee lets the solver treat every object that's here as clickable.)
+            if h["color"].lower() not in colours:
+                for state, sprite in P["objects"].get(o, {}).get("states", {}).items():
+                    if not sprite and state != "gone":
+                        E(w, f"'{o}' can't be clicked while '{state}': it has no sprite then, and its colour {h['color']} "
+                             "isn't painted in the object mask")
             if [x["color"].lower() for x in hot.values()].count(h["color"].lower()) > 1: E(w, f"colour {h['color']} is used twice")
         for e, x in l.get("exits", {}).items():
             ref(w, "edge", e); used["edge"].add(e)
@@ -269,9 +275,10 @@ def arrive(P, s, verb, target, rel):
 
 
 def visible(P, s):
-    """Targets in the current room: active hotspots and NPCs whose placement condition holds."""
+    """Targets in the current room: objects that are here (not gone, and their placement's
+    condition holds) and NPCs whose placement condition holds."""
     loc = P["locations"][s["loc"]]
-    objs = [o for o in loc.get("hotspots", {}) if s["objs"].get(o) != "gone"]
+    objs = [o for o, h in loc.get("hotspots", {}).items() if s["objs"].get(o) != "gone" and ok(s, h.get("if", []))]
     chars = []
     for c, l in s["chars"].items():
         n = next((n for n in loc.get("npcs", []) if n["character"] == c), None)

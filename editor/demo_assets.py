@@ -1,10 +1,10 @@
-"""Draw placeholder art and synthesize audio for projects/demo, so it runs with no artist.
+"""Draw placeholder art and synthesize audio for examples/demo, so it runs with no artist.
 Run: python editor/demo_assets.py   (already run once; outputs are committed)"""
 import math, struct, wave
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter
 
-D = Path(__file__).parent / "projects/demo"
+D = Path(__file__).parent / "examples/demo"
 W, H = 640, 360
 
 

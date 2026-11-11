@@ -8,10 +8,11 @@
 #   use ITEM on TARGET      a carried item on something in the room, or on another carried item
 #   VERB ITEM (inventory)   a verb on a carried item; for "use", that's the item on its own
 #   say 'LINE'              pick a dialogue option
-# `project` is relative to this file. `expect` lists only what the scenario is about.
+# `project` is relative to this file. `expect` lists only what the scenario is about, and
+# `blocked` lists moves that must not be possible once the moves are made.
 
 - name: demo_route
-  project: ../../editor/projects/demo
+  project: ../../editor/examples/demo
   moves: [take key, talk guard, "say 'str_opt_who'", "say 'str_opt_cat'", use key on door, walk door, take cake]
   expect:
     location: house
@@ -21,7 +22,7 @@
     characters: {guard: house}
 
 - name: demo_guard_blocks_the_door
-  project: ../../editor/projects/demo
+  project: ../../editor/examples/demo
   moves: [take key, use key on door, walk door]
   expect:
     location: street
@@ -58,3 +59,15 @@
   moves: [use bell, talk cat]
   expect:
     flags: {cat_awake: true, petted: true}
+
+- name: an_object_is_only_there_while_its_condition_holds
+  project: projects/workshop
+  moves: []
+  blocked: [take coin, look coin]
+
+- name: an_object_appears_when_its_condition_starts_holding
+  project: projects/workshop
+  moves: [use drawer, take coin]
+  expect:
+    inventory: [lamp, rope, hook, coin]
+  blocked: [take coin]          # it's gone now

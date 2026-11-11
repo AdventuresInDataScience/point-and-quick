@@ -6,6 +6,9 @@ hotspots:
   statue: {color: "#ff0000", mark: by_statue}
   button: {color: "#00ff00", mark: by_button}
   bell: {color: "#0000ff", mark: by_bell}
+  drawer: {color: "#ffff00", mark: by_button}
+  # the coin is only here once the drawer is open
+  coin: {color: "#ff00ff", mark: by_button, if: [{type: flag, flag: drawer_open}]}
 npcs:
   # the cat is only here once it's awake: ringing the bell makes it appear without leaving the room
   - {character: cat, mark: rug, if: [{type: flag, flag: cat_awake}]}

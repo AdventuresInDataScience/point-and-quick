@@ -17,6 +17,8 @@ def test_scenario(sc):
         offered = dict(check.moves(P, s, rel))
         assert mv in offered, f"the solver doesn't offer {mv!r}; it offers {sorted(offered)}"
         s = offered[mv]
+    offered = dict(check.moves(P, s, rel))
+    for mv in sc.get("blocked", []): assert mv not in offered, f"the solver offers {mv!r}, which should be blocked"
     e = sc.get("expect", {})
     if "location" in e: assert s["loc"] == e["location"]
     if "inventory" in e: assert sorted(s["inv"]) == sorted(e["inventory"])

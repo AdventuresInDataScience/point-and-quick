@@ -1,6 +1,6 @@
 """Project I/O, the shared spec tables, patch operations and the bundle exporter.
 A project is held in memory as one plain dict (see load) mirroring the folder on disk."""
-import copy, json, os, zipfile
+import copy, json, os, re, zipfile
 from pathlib import Path
 import yaml
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -32,7 +32,11 @@ ACTS = {
     "play_sound": {"file": "file"},
     "wait": {"seconds": "num"},
 }
-RESERVED = {"str_the_end"}          # strings the engine uses by name (plus verb_<verb> labels)
+# Strings the engine uses by name (plus verb_<verb> labels). The ui_ ones are its own menu and
+# messages; a game can define them to translate them, and the engine falls back to English.
+RESERVED = {"str_the_end", "ui_resume", "ui_save", "ui_load", "ui_quit", "ui_back", "ui_paused", "ui_save_title",
+            "ui_load_title", "ui_slot", "ui_autosave", "ui_quicksave", "ui_empty", "ui_saved", "ui_saved_to",
+            "ui_save_failed", "ui_cant_save", "ui_no_quicksave"}
 UI_DEFAULTS = {"style": "bar", "labels": "words", "speech": "top"}     # game.yaml interface; the engine's are the same
 
 
@@ -90,10 +94,17 @@ def blank(kind, i):
             }[kind]
 
 
-def new_project(root, gid):
+def make_id(name):
+    """An id from a name a person types: "My Game!" -> "my_game", "Front Door" -> "front_door".
+    "" if there's nothing usable in it. Used for projects, entities, marks and dialogue nodes."""
+    gid = "_".join(re.findall(r"[a-z0-9]+", name.lower()))
+    return f"game_{gid}" if gid[:1].isdigit() else gid      # ids start with a letter
+
+
+def new_project(root, gid, title=""):
     root = Path(root)
     P = {"root": str(root), "map": {"edges": []}, "locations": {}, "objects": {}, "dialogue": {},
-         "characters": {"player": blank("characters", "player")}, "strings": {"en": {"str_title": gid}},
+         "characters": {"player": blank("characters", "player")}, "strings": {"en": {"str_title": title or gid}},
          "game": {"spec_version": SPEC_VERSION, "id": gid, "title": "str_title", "resolution": [640, 360], "lang": "en",
                   "player": "player", "verbs": ["walk", "look", "talk", "use", "take"], "flags": {}, "ending": "",
                   "start": {"location": "", "mark": "", "inventory": [], "characters": {}}, "defaults": {}, "combinations": [],
@@ -154,6 +165,7 @@ def blocks(P):
                 yield f"{kind}/{i} rules[{j}]", i if kind == "locations" else None, r.get("if", []), r.get("do", [])
     for i, l in P["locations"].items():
         for j, n in enumerate(l.get("npcs", [])): yield f"locations/{i} npcs[{j}]", i, n.get("if", []), []
+        for o, h in l.get("hotspots", {}).items(): yield f"locations/{i} hotspots.{o}", i, h.get("if", []), []
     for c, fs in P["dialogue"].items():
         for f, d in fs.items():
             loc = None if f == "global" else f

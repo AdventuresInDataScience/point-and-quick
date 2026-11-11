@@ -1,0 +1,7 @@
+id: drawer
+name: str_drawer
+state: shut
+states: {shut: ""}
+rules:
+  - verb: use
+    do: [{type: set_flag, flag: drawer_open}]

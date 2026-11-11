@@ -1,0 +1,19 @@
+spec_version: '0.1'
+id: space_ace
+title: str_title
+resolution: [640, 360]
+lang: en
+player: player
+verbs: [walk, look, talk, use, take]
+flags: {}
+ending: ''
+start:
+  location: ''
+  mark: ''
+  inventory: []
+  characters: {}
+defaults: {}
+combinations:
+- items: ['', '']
+  do: []
+interface: {style: bar, labels: words, speech: top}

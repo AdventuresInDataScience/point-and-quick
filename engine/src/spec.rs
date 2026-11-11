@@ -2,9 +2,11 @@
 //! out of the game zip, and save files. serde does all the parsing and rejects unknown fields.
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 pub const SPEC_VERSION: &str = "0.1";
 
@@ -133,12 +135,16 @@ pub struct MapSheet {
     pub edges: Vec<Edge>,
 }
 
+/// An object placed in a location. The location lists them in draw order.
 #[derive(Deserialize, Clone, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Hotspot {
     pub color: String,       // this object's colour in the object mask
     pub mark: String,        // where the player walks to interact
     pub pos: [f32; 2],       // top-left of the object's sprite
+    pub layer: String,       // "back" (behind characters), "depth" or "" (sorted by bottom edge), "front"
+    #[serde(rename = "if")]
+    pub cond: Vec<Cond>,     // the object is here (drawn and clickable) only while these hold
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -180,7 +186,7 @@ pub struct Location {
     pub walkbehinds: Vec<Behind>,
     pub music: String,
     pub marks: HashMap<String, [f32; 2]>,
-    pub hotspots: HashMap<String, Hotspot>,
+    pub hotspots: IndexMap<String, Hotspot>, // in draw order (see Hotspot)
     pub exits: HashMap<String, Exit>,
     pub npcs: Vec<Npc>,
     pub rules: Vec<Rule>,
@@ -361,19 +367,55 @@ pub fn migrate(spec: &Spec, st: &mut State) {
     st.spec_version = SPEC_VERSION.to_string();
 }
 
-/// A save is the state manifest as JSON, encrypted with the game key when there is one
-/// (GCM's tag also rejects hand-edited saves). Saves live in ./saves/<game id>.sav.
-pub fn save(st: &State, game_id: &str, key: &Option<Vec<u8>>) {
-    let json = serde_json::to_vec_pretty(st).unwrap();
-    let bytes = match key { Some(k) => encrypt(&json, k), None => json };
-    std::fs::create_dir_all("saves").unwrap();
-    std::fs::write(format!("saves/{game_id}.sav"), bytes).unwrap();
+/// A save: the state manifest, and when it was saved (seconds since 1970).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Save {
+    pub saved_at: u64,
+    pub state: State,
 }
 
-pub fn load_save(spec: &Spec, key: &Option<Vec<u8>>) -> Option<State> {
-    let bytes = std::fs::read(format!("saves/{}.sav", spec.game.id)).ok()?;
+/// Where a game's saves go: PNC_SAVES if it's set, else a folder of the game's own in the user's
+/// app data (%APPDATA% on Windows, ~/Library/Application Support on macOS, $XDG_DATA_HOME or
+/// ~/.local/share elsewhere): PointAndClick/<game id>/saves. Never the folder the game runs from,
+/// which may be read-only once it's installed.
+pub fn saves_dir(game_id: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("PNC_SAVES") {
+        return PathBuf::from(dir);
+    }
+    let var = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty()).map(PathBuf::from);
+    let base = if cfg!(windows) {
+        var("APPDATA")
+    } else if cfg!(target_os = "macos") {
+        var("HOME").map(|h| h.join("Library/Application Support"))
+    } else {
+        var("XDG_DATA_HOME").or_else(|| var("HOME").map(|h| h.join(".local/share")))
+    };
+    base.unwrap_or_else(|| PathBuf::from(".")).join("PointAndClick").join(game_id).join("saves")
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Write a save slot ("auto", "quick", or "1".."6") as <dir>/<slot>.sav: JSON, encrypted with the
+/// game key when there is one (GCM's tag also rejects hand-edited saves).
+pub fn write_save(dir: &Path, slot: &str, st: &State, key: &Option<Vec<u8>>) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(&Save { saved_at: now(), state: st.clone() }).unwrap();
+    let bytes = match key { Some(k) => encrypt(&json, k), None => json };
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(format!("{slot}.sav")), bytes)
+}
+
+/// Read a save slot: its state, brought up to date with the spec (see migrate), and when it was
+/// saved. A save from before slots (a bare state) still loads, saved at an unknown time (0).
+pub fn read_save(dir: &Path, slot: &str, spec: &Spec, key: &Option<Vec<u8>>) -> Option<(State, u64)> {
+    let bytes = std::fs::read(dir.join(format!("{slot}.sav"))).ok()?;
     let json = match key { Some(k) => decrypt(&bytes, k)?, None => bytes };
-    let mut st: State = serde_json::from_slice(&json).ok()?;
+    let (mut st, at) = match serde_json::from_slice::<Save>(&json) {
+        Ok(s) => (s.state, s.saved_at),
+        Err(_) => (serde_json::from_slice::<State>(&json).ok()?, 0),
+    };
     migrate(spec, &mut st);
-    Some(st)
+    Some((st, at))
 }
