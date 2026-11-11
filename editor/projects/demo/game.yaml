@@ -6,6 +6,10 @@ resolution: [640, 360]
 lang: en
 player: player
 verbs: [walk, look, talk, use, take]
+interface:                  # style: bar (with labels: words/icons/captioned) or ring
+  style: ring
+  icons: {walk: ui/walk.png, look: ui/look.png, talk: ui/talk.png, use: ui/use.png, take: ui/take.png}
+  speech: top
 flags:                      # every flag is declared here with its default
   guard_left: false
   game_won: false

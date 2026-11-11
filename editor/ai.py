@@ -17,8 +17,8 @@ DEFAULTS = {
 _models = {}                         # loaded models, kept for the session
 
 
-def settings(): return {**DEFAULTS, **(yaml.safe_load(CFG.read_text()) if CFG.exists() else {})}
-def save_settings(cfg): CFG.write_text(yaml.safe_dump(cfg, sort_keys=False))
+def settings(): return {**DEFAULTS, **(yaml.safe_load(CFG.read_text(encoding="utf-8")) if CFG.exists() else {})}
+def save_settings(cfg): CFG.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
 
 def post(cfg, url, payload):
@@ -137,7 +137,7 @@ def voice_all(P, cfg):
     """Write voice/<line id>.wav for every spoken line whose text or voice changed since last run.
     Hashes live in voice/.hashes.json, so editing one line regenerates only that line."""
     root = Path(P["root"]); hp = root / "voice/.hashes.json"
-    hashes = json.loads(hp.read_text()) if hp.exists() else {}
+    hashes = json.loads(hp.read_text(encoding="utf-8")) if hp.exists() else {}
     tab, player = P["strings"][P["game"].get("lang", "en")], P["game"]["player"]
     speaker = {}                             # line id -> character who says it
     for c, fs in P["dialogue"].items():
@@ -155,7 +155,7 @@ def voice_all(P, cfg):
         if not tab.get(line) or hashes.get(line) == h: continue
         tts(cfg, tab[line], voice, root / f"voice/{line}.wav", root)
         hashes[line] = h; done.append(line)
-    hp.parent.mkdir(parents=True, exist_ok=True); hp.write_text(json.dumps(hashes, indent=1))
+    hp.parent.mkdir(parents=True, exist_ok=True); hp.write_text(json.dumps(hashes, indent=1), encoding="utf-8")
     return done
 
 

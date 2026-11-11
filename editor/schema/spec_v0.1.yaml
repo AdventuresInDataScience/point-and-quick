@@ -99,6 +99,22 @@ $defs:
       said: {type: array, items: {type: string}}                        # conversation state, global
       music: {type: string}                                              # play_music override, "" = room default
 
+  # How the player gives commands (game.yaml). The style decides which other settings apply:
+  #   bar   a verb bar and inventory under the scene; `labels` says how the verbs are shown
+  #         (words, icons, or icons with captions)
+  #   ring  the scene fills the window: click to walk, hold on something for a ring of verbs,
+  #         right-click for the inventory. `labels` doesn't apply (check.py rejects it here).
+  # `icons` (verb -> image) are used wherever verbs show as icons, so they survive a style change.
+  # `speech` is where spoken lines appear. Defaults: bar, words, no icons, top.
+  interface:
+    type: object
+    additionalProperties: false
+    properties:
+      style: {enum: [bar, ring]}
+      labels: {enum: [words, icons, captioned]}
+      icons: {type: object, additionalProperties: {type: string}}
+      speech: {enum: [top, over_speaker]}
+
   # ---------- one def per file ----------
   game:            # game.yaml
     type: object
@@ -117,6 +133,7 @@ $defs:
       start: {$ref: "#/$defs/state"}
       defaults: {$ref: "#/$defs/lines"}
       combinations: {type: array, items: {$ref: "#/$defs/combo"}}
+      interface: {$ref: "#/$defs/interface"}
 
   map:             # map.yaml: the single source of truth for exits
     type: object

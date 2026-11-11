@@ -88,6 +88,19 @@ def check(P):
     for i, r in enumerate(g.get("combinations", [])):
         for it in r["items"]: ref(f"game.yaml combinations[{i}]", "item", it)
 
+    # -- the interface: each style reads only its own settings
+    ui, w = {**spec.UI_DEFAULTS, **g.get("interface", {})}, "game.yaml interface"
+    if ui["style"] == "ring" and "labels" in g.get("interface", {}):
+        E(w, "'labels' is a bar setting; the ring style doesn't use it")
+    for verb, icon in ui.get("icons", {}).items():
+        if verb not in I["verb"]: E(w, f"there's an icon for '{verb}', which isn't one of the verbs")
+        ref(w, "file", icon)
+    # verbs the style shows as icons (the ring leaves out walk: walking is a plain click)
+    shown = ([v for v in I["verb"] if v != "walk"] if ui["style"] == "ring"
+             else I["verb"] if ui["labels"] in ("icons", "captioned") else [])
+    for v in shown:
+        if v not in ui.get("icons", {}): W(w, f"verb '{v}' has no icon, so the {ui['style']} shows its name instead")
+
     # -- map.yaml
     for e in P["map"].get("edges", []):
         w = f"map.yaml {e['id']}"
@@ -110,7 +123,8 @@ def check(P):
         hot = l.get("hotspots", {})
         for o, h in hot.items():
             ref(w, "object", o); ref(w, "mark", h["mark"], i)
-            if h["color"].lower() not in colours: W(w, f"colour {h['color']} for '{o}' isn't painted in the object mask")
+            # the engine finds hotspots by their colour under the mouse, so an unpainted one can't be clicked
+            if h["color"].lower() not in colours: E(w, f"colour {h['color']} for '{o}' isn't painted in the object mask, so it can't be clicked")
             if [x["color"].lower() for x in hot.values()].count(h["color"].lower()) > 1: E(w, f"colour {h['color']} is used twice")
         for e, x in l.get("exits", {}).items():
             ref(w, "edge", e); used["edge"].add(e)
@@ -232,14 +246,17 @@ def settle(P, s, rel):
 
 def interact(P, s, verb, target, item, rel):
     """Verb dispatch, same order as the engine: combination, target's rules, dialogue, fallbacks."""
-    if item and verb == "use" and target in s["inv"]:
+    if item and item != target and verb == "use" and target in s["inv"]:
         for r in P["game"].get("combinations", []):
             if target in r["items"] and item in r["items"] and ok(s, r.get("if", [])): return run(P, s, r["do"], rel)
-    sheet = P["objects"].get(target) or P["characters"].get(target) or {}
-    for r in sheet.get("rules", []):
+    sheet = lambda i: P["objects"].get(i) or P["characters"].get(i) or {}
+    for r in sheet(target).get("rules", []):
         if r["verb"] == verb and r.get("with", "") == item and ok(s, r.get("if", [])): return run(P, s, r["do"], rel)
-    if verb == "talk" and target in P["dialogue"]: talk(P, s, target, "", rel)
-    # fallback lines only say something; nothing changes
+    if verb == "talk" and target in P["dialogue"]: return talk(P, s, target, "", rel)
+    # a fallback line only gets said, but saying it still counts for "said" conditions
+    fb = lambda i: sheet(i).get("fallback", {}).get(verb, "")
+    line = (item and fb(item)) or fb(target) or P["game"].get("defaults", {}).get(verb, "")
+    if line: run(P, s, [{"type": "say", "line": line}], rel)
 
 
 def arrive(P, s, verb, target, rel):
@@ -290,16 +307,16 @@ def moves(P, s, rel):
         for v in verbs: do(f"{v} {t}", lambda n, v=v, t=t: arrive(P, n, v, t, rel))
         for it in s["inv"]: do(f"use {it} on {t}", lambda n, it=it, t=t: interact(P, n, "use", t, it, rel))
     for it in s["inv"]:
+        # "use X (inventory)" is using X on its own: in the engine, pick "use", click X, click X again
         for v in verbs: do(f"{v} {it} (inventory)", lambda n, v=v, it=it: interact(P, n, v, it, "", rel))
         for other in s["inv"]:
             if other != it: do(f"use {it} on {other}", lambda n, it=it, o=other: interact(P, n, "use", o, it, rel))
     return out
 
 
-def solve(P, max_states=200_000):
-    """Breadth-first search from the start state. Returns a report dict."""
-    g = P["game"]; ending = g.get("ending", "")
-    # only said-lines that some condition or "once" option reads are part of the state
+def start(P):
+    """The solver's start state, after the start room's enter rule, plus the said-lines it tracks:
+    only those that some condition or "once" option reads are part of the state."""
     rel = {c["line"] for _, _, conds, _ in spec.blocks(P) for c in conds if c["type"] == "said"}
     rel |= {o["line"] for fs in P["dialogue"].values() for d in fs.values() for n in d.get("nodes", {}).values()
             for o in n.get("options", []) if o.get("once")}
@@ -307,6 +324,13 @@ def solve(P, max_states=200_000):
     s0 = {"loc": m["location"], "inv": list(m["inventory"]), "flags": dict(m["flags"]), "objs": dict(m["objects"]),
           "chars": {c: p.get("location", "") for c, p in m["characters"].items()}, "said": set(), "dialog": None}
     enter(P, s0, s0["loc"], rel); settle(P, s0, rel)
+    return s0, rel
+
+
+def solve(P, max_states=200_000):
+    """Breadth-first search from the start state. Returns a report dict."""
+    ending = P["game"].get("ending", "")
+    s0, rel = start(P)
     states, parent, succ, seen = [s0], [None], [[]], {freeze(s0): 0}
     i = 0
     while i < len(states) and len(states) < max_states:
@@ -317,15 +341,19 @@ def solve(P, max_states=200_000):
                 succ[i].append(seen[k])
         i += 1
     ends = [j for j, s in enumerate(states) if ending and s["flags"].get(ending)]
-    # walk edges backwards from the endings: whatever can't reach one is a softlock
+    capped = i < len(states)
+    # Walk edges backwards from the endings: whatever can't reach one is a softlock. If the search
+    # was capped, states it never expanded might still lead to an ending, so they count as good too;
+    # that way a capped search only reports softlocks it's sure of.
     pred = [[] for _ in states]
     for a, bs in enumerate(succ):
         for b in bs: pred[b].append(a)
-    good, stack = set(ends), list(ends)
+    seeds = ends + list(range(i, len(states)))
+    good, stack = set(seeds), list(seeds)
     while stack:
         for a in pred[stack.pop()]:
             if a not in good: good.add(a); stack.append(a)
-    stuck = [j for j in range(i) if j not in good]          # only fully explored states count
+    stuck = [j for j in range(i) if j not in good] if ends or capped else []
 
     def path(j):
         steps = []
@@ -333,21 +361,25 @@ def solve(P, max_states=200_000):
         return steps[::-1]
 
     items = set(spec.ids(P)["item"])
-    return {"states": len(states), "capped": i < len(states), "ending": bool(ends),
+    return {"states": len(states), "capped": capped, "ending": bool(ends),
             "ending_path": path(ends[0]) if ends else [],
             "unreachable_locations": sorted(set(P["locations"]) - {s["loc"] for s in states}),
             "unobtainable_items": sorted(items - {it for s in states for it in s["inv"]}),
-            "softlocks": len(stuck) if ends else 0, "softlock_path": path(stuck[0]) if stuck and ends else []}
+            "softlocks": len(stuck), "softlock_path": path(stuck[0]) if stuck else []}
 
 
-def run_all(P):
+def run_all(P, max_states=200_000):
     """Both tiers as one issue list (tier 2 only runs on a valid project), plus the solver report."""
     issues = check(P)
     if any(lvl == "error" for lvl, _, _ in issues): return issues, None
-    r = solve(P)
-    if P["game"].get("ending") and not r["ending"]: issues.append(("error", "solver", "the ending can never be reached"))
-    for l in r["unreachable_locations"]: issues.append(("warning", "solver", f"location '{l}' can never be reached"))
-    for it in r["unobtainable_items"]: issues.append(("warning", "solver", f"item '{it}' can never be obtained"))
+    r = solve(P, max_states)
+    if P["game"].get("ending") and not r["ending"]:
+        if r["capped"]: issues.append(("warning", "solver", "no route to the ending was found before the search stopped"))
+        else: issues.append(("error", "solver", "the ending can never be reached"))
+    # with a capped search these two lists only cover the part of the game that was explored
+    maybe = " (in the part of the game the search explored)" if r["capped"] else ""
+    for l in r["unreachable_locations"]: issues.append(("warning", "solver", f"location '{l}' can never be reached{maybe}"))
+    for it in r["unobtainable_items"]: issues.append(("warning", "solver", f"item '{it}' can never be obtained{maybe}"))
     if r["softlocks"]: issues.append(("error", "solver", f"{r['softlocks']} softlocked states, e.g. after: " + " → ".join(r["softlock_path"])))
     if r["capped"]: issues.append(("warning", "solver", f"search stopped at {r['states']} states; results are partial"))
     return issues, r

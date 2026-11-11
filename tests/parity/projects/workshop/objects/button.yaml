@@ -1,0 +1,8 @@
+id: button
+name: str_button
+state: here
+states: {here: ""}
+rules:
+  - verb: use
+    if: [{type: said, line: str_statue_look}]
+    do: [{type: set_flag, flag: noticed}]

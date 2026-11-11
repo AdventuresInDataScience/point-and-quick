@@ -1,0 +1,60 @@
+# Scenarios the editor's solver and the engine must play the same way.
+#   editor/tests/test_parity.py plays them through check.py's simulator (pytest)
+#   engine/src/tests.rs plays them through the engine's own logic (cargo test)
+# If either side changes the game semantics alone, its test fails.
+#
+# Moves use the solver's labels:
+#   VERB TARGET             a verb on something in the room
+#   use ITEM on TARGET      a carried item on something in the room, or on another carried item
+#   VERB ITEM (inventory)   a verb on a carried item; for "use", that's the item on its own
+#   say 'LINE'              pick a dialogue option
+# `project` is relative to this file. `expect` lists only what the scenario is about.
+
+- name: demo_route
+  project: ../../editor/projects/demo
+  moves: [take key, talk guard, "say 'str_opt_who'", "say 'str_opt_cat'", use key on door, walk door, take cake]
+  expect:
+    location: house
+    inventory: [cake]
+    flags: {guard_left: true, game_won: true}
+    objects: {door: open, key: gone, cake: gone}
+    characters: {guard: house}
+
+- name: demo_guard_blocks_the_door
+  project: ../../editor/projects/demo
+  moves: [take key, use key on door, walk door]
+  expect:
+    location: street
+    inventory: [key]
+    flags: {guard_left: false}
+    objects: {door: locked}
+
+- name: use_an_item_on_its_own
+  project: projects/workshop
+  moves: [use lamp (inventory)]
+  expect:
+    flags: {lamp_on: true}
+
+- name: an_item_on_itself_is_not_a_combination
+  project: projects/workshop
+  moves: [use rope (inventory)]
+  expect:
+    flags: {rope_hooked: false}
+
+- name: combine_two_items
+  project: projects/workshop
+  moves: [use rope on hook]
+  expect:
+    flags: {rope_hooked: true}
+
+- name: a_fallback_line_counts_as_said
+  project: projects/workshop
+  moves: [look statue, use button]
+  expect:
+    flags: {noticed: true}
+
+- name: an_npc_appears_when_its_condition_starts_holding
+  project: projects/workshop
+  moves: [use bell, talk cat]
+  expect:
+    flags: {cat_awake: true, petted: true}

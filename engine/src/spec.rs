@@ -83,6 +83,23 @@ pub struct State {
     pub music: String,                           // play_music override; "" = the room's default
 }
 
+/// How the player gives commands (game.yaml `interface`). The style decides which other settings
+/// apply; see ui.rs. Missing fields take these defaults, which match the editor's.
+#[derive(Deserialize, Clone)]
+#[serde(default, deny_unknown_fields)]
+pub struct Interface {
+    pub style: String,                  // "bar" (verb bar under the scene) or "ring"
+    pub labels: String,                 // bar only: verbs as "words", "icons" or "captioned" icons
+    pub icons: HashMap<String, String>, // verb -> icon image
+    pub speech: String,                 // spoken lines at the "top" of the screen, or "over_speaker"
+}
+
+impl Default for Interface {
+    fn default() -> Self {
+        Interface { style: "bar".into(), labels: "words".into(), icons: HashMap::new(), speech: "top".into() }
+    }
+}
+
 #[derive(Deserialize, Clone, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Game {
@@ -98,6 +115,7 @@ pub struct Game {
     pub start: State,
     pub defaults: HashMap<String, String>,
     pub combinations: Vec<Rule>,
+    pub interface: Interface,
 }
 
 #[derive(Deserialize, Clone, Default)]

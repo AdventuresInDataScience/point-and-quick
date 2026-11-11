@@ -50,7 +50,7 @@ fn sheet(g: &G, id: &str) -> (Vec<Rule>, HashMap<String, String>) {
 /// 3. talking to a character with no talk rule opens its dialogue
 /// 4. fallback lines: the used item's, then the target's, then the game's default for the verb
 pub fn interact(g: &mut G, verb: &str, target: &str, item: &str) {
-    if verb == "use" && !item.is_empty() && has(&g.st.inventory, target) {
+    if verb == "use" && !item.is_empty() && item != target && has(&g.st.inventory, target) {
         for r in g.spec.game.combinations.clone() {
             if has(&r.items, target) && has(&r.items, item) && ok(&g.st, &r.cond) {
                 g.queue.extend(r.act);
@@ -81,6 +81,20 @@ pub fn interact(g: &mut G, verb: &str, target: &str, item: &str) {
             return;
         }
     }
+}
+
+/// The player clicked an inventory item with a verb. With "use" and nothing picked yet, the item is
+/// picked for "use X with ..."; clicking the picked item again uses it on its own. check.py's solver
+/// offers exactly these moves: "use X (inventory)" is X alone, "use X on Y" is X picked, then Y.
+pub fn click_item(g: &mut G, verb: &str, it: &str) {
+    if verb == "use" && g.item.is_empty() {
+        g.item = it.to_string();
+        return;
+    }
+    let item = if verb == "use" && g.item != it { g.item.clone() } else { String::new() };
+    interact(g, verb, it, &item);
+    g.verb = "walk".to_string();
+    g.item.clear();
 }
 
 /// The player has walked up to a target. Walking onto a hotspot that triggers an exit takes it

@@ -1,0 +1,7 @@
+id: bell
+name: str_bell
+state: here
+states: {here: ""}
+rules:
+  - verb: use
+    do: [{type: set_flag, flag: cat_awake}]

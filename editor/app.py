@@ -1,6 +1,6 @@
 """Point & Click Maker — the Streamlit editor.   Run:  streamlit run editor/app.py
 Each page edits one part of the project dict (see spec.load). Edits save to disk automatically."""
-import copy, re
+import copy, os, re
 from pathlib import Path
 import pandas as pd, streamlit as st
 from PIL import Image, ImageDraw
@@ -8,7 +8,8 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 import ai, check, spec
 
 HERE = Path(__file__).parent
-PROJECTS, EXPORTS = HERE / "projects", HERE / "exports"
+# PNC_PROJECTS points the editor at another projects folder (the UI tests use a temporary one)
+PROJECTS, EXPORTS = Path(os.environ.get("PNC_PROJECTS", HERE / "projects")), HERE / "exports"
 PROJECTS.mkdir(exist_ok=True)
 st.set_page_config("Point & Click Maker", layout="wide")
 S = st.session_state
@@ -27,11 +28,14 @@ def K(*parts): return ":".join(map(str, (S.ver, *parts)))
 def changed(): S.dirty = True
 def restructure(): S.ver += 1; S.dirty = True; st.rerun()
 def reload(P): S.proj = P; S.ver += 1; S.dirty = True
-def snapshot(): S.undo = S.undo[-19:] + [copy.deepcopy(S.proj)]
+# Undo: S.saved is the project as last written to disk. Every run that changes something pushes
+# it onto S.undo before saving (see the bottom of this file), so each edit is one undo step.
 
 
-def put(d, k, v):
-    """Store a widget value if it changed. Empty values remove the (optional) key."""
+def put(d, k, v, default=None):
+    """Store a widget value if it changed. Empty values remove the (optional) key. A key the sheet
+    leaves out stays out while its widget shows the `default`, so viewing a sheet never writes."""
+    if k not in d and default is not None and v == default: return
     if v in ("", None, [], {}):
         if d.get(k) not in ("", None, [], {}): d.pop(k); changed()
     elif d.get(k) != v: d[k] = v; changed()
@@ -63,13 +67,15 @@ with st.sidebar:
 if not pick_project: st.info("Create a project in the sidebar to start."); st.stop()
 if S.get("loaded") != pick_project:
     S.proj, S.loaded, S.undo = spec.load(PROJECTS / pick_project), pick_project, []; S.ver += 1
+    S.saved = copy.deepcopy(S.proj)
 P = S.proj; G = P["game"]; LANG = G.get("lang", "en"); ROOT = Path(P["root"]); I = spec.ids(P)
 PNGS = [f for f in I["file"] if f.endswith(".png")]
 AUDIO = [f for f in I["file"] if f.endswith((".wav", ".ogg", ".mp3", ".flac"))]
 with st.sidebar:
     page = st.radio("Edit", ["Game", "Map", "Locations", "Objects", "Characters", "Dialogue", "Strings", "Assets",
                              "Assistant", "Check & export", "AI assets"])
-    if S.undo and st.button("Undo last change"): reload(S.undo.pop()); st.rerun()
+    if S.undo and st.button("Undo last change", help="Undoes edits to the spec files; painted layers and uploads stay"):
+        reload(S.undo.pop()); S.undoing = True; st.rerun()
 
 
 # ---------------- pickers bound to real IDs ----------------
@@ -171,7 +177,7 @@ def prose(r, owner, kind):
 
 def rule_cards(d, owner, kind, verbs, loc=None, key="rules"):
     """Every rule as a prose card; Edit opens pickers for each token. First matching rule wins."""
-    rules, order = d.setdefault(key, []), None
+    rules, order = d.get(key, []), None       # no empty list written for a sheet without rules
     for i, r in enumerate(rules):
         with st.container(border=True):
             st.markdown(prose(r, owner, kind))
@@ -199,7 +205,7 @@ def rule_cards(d, owner, kind, verbs, loc=None, key="rules"):
         else: rules[i], rules[j] = rules[j], rules[i]
         restructure()
     if st.button("Add rule", key=K(owner, key, "add")):
-        rules.append({"items": ["", ""], "do": []} if kind == "combo" else {"verb": verbs[0], "do": []}); restructure()
+        d.setdefault(key, []).append({"items": ["", ""], "do": []} if kind == "combo" else {"verb": verbs[0], "do": []}); restructure()
 
 
 def fallbacks(d, owner):
@@ -213,7 +219,7 @@ def fallbacks(d, owner):
 def add_entity(kind):
     i = S.get(f"new:{kind}", "").strip()
     if re.fullmatch(r"[a-z][a-z0-9_]*", i) and not any(i in P[k] for k in ("locations", "objects", "characters")):
-        snapshot(); S.proj[kind][i] = spec.blank(kind, i); S[f"sel:{kind}"] = i; S.ver += 1; S.dirty = True
+        S.proj[kind][i] = spec.blank(kind, i); S[f"sel:{kind}"] = i; S.ver += 1; S.dirty = True
 
 
 def entity(kind, title):
@@ -222,7 +228,7 @@ def entity(kind, title):
     cur = c[0].selectbox(title, list(P[kind]), key=f"sel:{kind}", format_func=label) if P[kind] else None
     c[1].text_input(f"New {title.lower()} id", key=f"new:{kind}", placeholder="lowercase_id")
     c[2].button("Add", key=f"add:{kind}", on_click=add_entity, args=(kind,))
-    if cur and c[3].button("Delete", key=K("del", kind)): snapshot(); spec.delete(P, kind, cur); S.pop(f"sel:{kind}", None); restructure()
+    if cur and c[3].button("Delete", key=K("del", kind)): spec.delete(P, kind, cur); S.pop(f"sel:{kind}", None); restructure()
     return cur
 
 
@@ -339,14 +345,37 @@ if page == "Game":
     st.header("Game")
     c = st.columns(4)
     with c[0]: put(G, "title", line("Title", G.get("title", ""), "title", "title"))
-    put(G, "lang", c[1].text_input("Main language", LANG, key=K("lang")))
+    put(G, "lang", c[1].text_input("Main language", LANG, key=K("lang")), default="en")
     with c[2]: put(G, "player", pick("Player character", I["character"], G.get("player", ""), K("player")))
     with c[3]: put(G, "ending", pick("Ending flag", I["flag"], G.get("ending", ""), K("ending")))
     w, h = G.get("resolution", [640, 360])
     c = st.columns(4)
-    put(G, "resolution", [c[0].number_input("Width", value=int(w), key=K("w")), c[1].number_input("Height", value=int(h), key=K("h"))])
+    put(G, "resolution", [c[0].number_input("Width", value=int(w), key=K("w")), c[1].number_input("Height", value=int(h), key=K("h"))],
+        default=[640, 360])
     common = ["walk", "look", "talk", "use", "take", "open", "close", "push", "pull", "give"]
     put(G, "verbs", c[2].multiselect("Verbs", sorted(set(common) | set(G.get("verbs", []))), G.get("verbs", []), key=K("verbs")))
+    st.subheader("Interface")
+    st.caption("How the player gives commands. The style decides which other settings apply.")
+    ui = spec.interface(G)
+    STYLES = {"bar": "Verb bar under the scene", "ring": "Verb ring: hold on something; right-click for the inventory"}
+    LABELS = {"words": "Words", "icons": "Icons", "captioned": "Icons with captions"}
+    SPEECH = {"top": "At the top of the screen", "over_speaker": "Over the speaker"}
+    c = st.columns(3)
+    style = c[0].radio("Style", list(STYLES), list(STYLES).index(ui["style"]), format_func=STYLES.get, key=K("ui_style"))
+    labels = (c[1].radio("Verbs shown as", list(LABELS), list(LABELS).index(ui.get("labels", "words")), format_func=LABELS.get,
+                         key=K("ui_labels")) if style == "bar" else "words")
+    speech = c[2].radio("Spoken lines appear", list(SPEECH), list(SPEECH).index(ui["speech"]), format_func=SPEECH.get, key=K("ui_speech"))
+    icons = dict(ui.get("icons", {}))         # kept whatever the style, so switching back finds them again
+    if style == "ring" or labels != "words":
+        shown = [v for v in G.get("verbs", []) if not (style == "ring" and v == "walk")]
+        st.caption("Verb icons are drawn at 24×24 game pixels; 48×48 images stay sharp in the default window. A verb without "
+                   "an icon shows its name." + (" The ring leaves out walk: walking is a plain click." if style == "ring" else ""))
+        for col, v in zip(st.columns(len(shown) or 1), shown):
+            with col:
+                icons[v] = pick(v, PNGS, icons.get(v, ""), K("ui_icon", v))
+                if icons[v] and (ROOT / icons[v]).is_file(): st.image(str(ROOT / icons[v]), width=32)
+    new = spec.interface({"verbs": G.get("verbs", []), "interface": {"style": style, "labels": labels, "icons": icons, "speech": speech}})
+    if new != ui: G["interface"] = new; changed()       # only settings the chosen style uses are written
     st.subheader("Flags")
     st.caption("Every flag is declared here with its default, so the Check can catch typos.")
     rows = [{"flag": f, "default": v} for f, v in G.get("flags", {}).items()]
@@ -390,7 +419,7 @@ elif page == "Locations":
         with c[1]: put(l, "music", pick("Default music", AUDIO, l.get("music", ""), K(lid, "music")))
         s0, s1 = l.get("scale", [1, 1])
         put(l, "scale", [c[2].number_input("Scale far (depth black)", value=float(s0), step=0.05, key=K(lid, "s0")),
-                         c[3].number_input("Scale near (depth white)", value=float(s1), step=0.05, key=K(lid, "s1"))])
+                         c[3].number_input("Scale near (depth white)", value=float(s1), step=0.05, key=K(lid, "s1"))], default=[1, 1])
         layer_editor(lid, l)
         marks = list(l.get("marks", {}))
         a, b = st.columns(2)
@@ -424,7 +453,12 @@ elif page == "Locations":
         old = l.get("npcs", [])
         new = table([{k: n.get(k) for k in ("character", "mark", "facing", "state")} for n in old], ["character", "mark", "facing", "state"], (lid, "npcs"),
                     character=Col.SelectboxColumn(options=I["character"]), mark=Col.SelectboxColumn(options=marks), facing=Col.SelectboxColumn(options=FACING))
-        new = [{**r, **({"if": old[i]["if"]} if i < len(old) and old[i].get("if") else {})} for i, r in enumerate(new) if r.get("character")]
+        # Placement conditions aren't table columns, so carry them over by character (the engine uses a
+        # character's first placement here); matching by row would shift them when a row is deleted.
+        conds = {}
+        for n in old:
+            if n.get("if"): conds.setdefault(n["character"], n["if"])
+        new = [{**r, **({"if": conds[r["character"]]} if r["character"] in conds else {})} for r in new if r.get("character")]
         put(l, "npcs", new)
         for i, n in enumerate(l.get("npcs", [])):
             with st.expander(f"Only here if… ({spec.name(P, n['character'])})"): edit_list(n.setdefault("if", []), spec.CONDS, K(lid, "npc", i), lid)
@@ -455,8 +489,8 @@ elif page == "Characters":
         ch = P["characters"][cid]
         c = st.columns(4)
         with c[0]: put(ch, "name", line("Name", ch.get("name", ""), f"{cid}:name", cid))
-        put(ch, "speed", c[1].number_input("Walk speed (px/s)", value=float(ch.get("speed", 120)), key=K(cid, "speed")))
-        put(ch, "text_color", c[2].color_picker("Speech colour", ch.get("text_color", "#ffffff"), key=K(cid, "col")))
+        put(ch, "speed", c[1].number_input("Walk speed (px/s)", value=float(ch.get("speed", 120)), key=K(cid, "speed")), default=120)
+        put(ch, "text_color", c[2].color_picker("Speech colour", ch.get("text_color", "#ffffff"), key=K(cid, "col")), default="#ffffff")
         voice = dict(ch.get("voice", {}))
         voice["model"] = c[3].text_input("Voice model", voice.get("model", ""), key=K(cid, "voice"))
         st.subheader("Animations")
@@ -552,8 +586,9 @@ elif page == "Assistant":
     intent = st.text_area("Intent", key="intent", placeholder="the key opens the door, but only after the guard leaves")
 
     def draft(answers):
+        # anything a backend can throw (no backend set, network errors, a malformed reply) is shown, not a traceback
         try: S.draft = ai.author(P, intent, cfg, answers); S.answers = answers
-        except RuntimeError as e: st.error(str(e))
+        except Exception as e: st.error(f"{type(e).__name__}: {e}" if not isinstance(e, RuntimeError) else str(e))
 
     if st.button("Draft changes", type="primary", disabled=not intent): draft([])
     dr = S.get("draft")
@@ -573,7 +608,7 @@ elif page == "Assistant":
         for e in dr["errors"]: st.error(e)
         c = st.columns(2)
         if c[0].button("Accept", type="primary", disabled=dr["proj"] is None or bool(dr["errors"])):
-            snapshot(); reload(dr["proj"]); S.draft = None; st.rerun()
+            reload(dr["proj"]); S.draft = None; st.rerun()
         if c[1].button("Discard"): S.draft = None; st.rerun()
 
 elif page == "Check & export":
@@ -594,7 +629,9 @@ elif page == "Check & export":
         out, key = S.export
         st.download_button(f"Download {out.name}", out.read_bytes(), out.name)
         st.caption("Run it with the engine (the key is compiled in, so each release game gets its own build):")
-        st.code(f"cd engine\n{'GAME_KEY=' + key + ' ' if key else ''}cargo run --release -- {out.resolve()}", language="bash")
+        if os.name == "nt": env, lang = f'$env:GAME_KEY="{key}"; ' if key else "", "powershell"
+        else: env, lang = f"GAME_KEY={key} " if key else "", "bash"
+        st.code(f'cd engine\n{env}cargo run --release -- "{out.resolve()}"', language=lang)
 
 elif page == "AI assets":
     st.header("AI assets")
@@ -610,7 +647,7 @@ elif page == "AI assets":
 
     def attempt(fn, *a):
         try: return fn(*a)
-        except RuntimeError as e: st.error(str(e))
+        except Exception as e: st.error(f"{type(e).__name__}: {e}" if not isinstance(e, RuntimeError) else str(e))
 
     voices, art, sheets, sound = st.tabs(["Voices", "Location and object art", "Sprite sheets", "Music and SFX (experimental)"])
     with voices:
@@ -621,7 +658,8 @@ elif page == "AI assets":
     with art:
         prompt = st.text_area("Describe the image", key="art_prompt")
         c = st.columns(3)
-        size = (int(c[0].number_input("Width", value=int(G["resolution"][0]))), int(c[1].number_input("Height", value=int(G["resolution"][1]))))
+        rw, rh = G.get("resolution", [640, 360])
+        size = (int(c[0].number_input("Width", value=int(rw))), int(c[1].number_input("Height", value=int(rh))))
         path = c[2].text_input("Save as", "assets/art.png")
         if st.button("Generate image", disabled=not prompt): S.art = attempt(ai.image, cfg, prompt, size)
         if S.get("art"):
@@ -653,5 +691,7 @@ elif page == "AI assets":
         if st.button("Generate audio", disabled=not prompt): attempt(ai.audio, cfg, prompt, secs, ROOT / path)
         if (ROOT / path).is_file(): st.audio(str(ROOT / path))
 
-# Save whatever this run changed.
-if S.dirty: spec.save(S.proj); S.dirty = False
+# Save whatever this run changed, keeping the previous version for undo (unless this run was the undo).
+if S.dirty:
+    if not S.pop("undoing", False) and S.proj != S.saved: S.undo = S.undo[-49:] + [S.saved]
+    spec.save(S.proj); S.saved = copy.deepcopy(S.proj); S.dirty = False

@@ -1,0 +1,6 @@
+# No rules: looking at it says its fallback line, which the button's rule checks for.
+id: statue
+name: str_statue
+state: here
+states: {here: ""}
+fallback: {look: str_statue_look}

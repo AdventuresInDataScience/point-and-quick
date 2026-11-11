@@ -1,0 +1,6 @@
+id: rope
+name: str_rope
+icon: objects/rope/icon.png
+state: carried
+states: {carried: ""}
+fallback: {use: str_rope_no}

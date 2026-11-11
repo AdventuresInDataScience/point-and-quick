@@ -6,7 +6,7 @@ import yaml
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 SPEC_VERSION = "0.1"
-SCHEMA = yaml.safe_load((Path(__file__).parent / "schema/spec_v0.1.yaml").read_text())
+SCHEMA = yaml.safe_load((Path(__file__).parent / "schema/spec_v0.1.yaml").read_text(encoding="utf-8"))
 
 # Field kinds for every condition and action type ("?" = optional). The editor's pickers, the
 # Check's reference tests and the rule-card prose are all driven by these two tables.
@@ -33,14 +33,26 @@ ACTS = {
     "wait": {"seconds": "num"},
 }
 RESERVED = {"str_the_end"}          # strings the engine uses by name (plus verb_<verb> labels)
+UI_DEFAULTS = {"style": "bar", "labels": "words", "speech": "top"}     # game.yaml interface; the engine's are the same
 
 
-def read(path): return yaml.safe_load(Path(path).read_text()) or {}
+def interface(g):
+    """game.yaml's interface in the form the editor stores it: only the settings its style uses
+    (`labels` is bar-only), and icons only for verbs the game has."""
+    ui = {**UI_DEFAULTS, **g.get("interface", {})}
+    out = {"style": ui["style"], **({"labels": ui["labels"]} if ui["style"] == "bar" else {})}
+    icons = {v: f for v, f in ui.get("icons", {}).items() if f and v in g.get("verbs", [])}
+    return {**out, **({"icons": icons} if icons else {}), "speech": ui["speech"]}
+
+
+# Spec files are always UTF-8: the engine requires it, and Windows would otherwise default to cp1252.
+def read(path): return yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
 
 
 def dump(path, data):
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=None, allow_unicode=True, width=110))
+    text = yaml.safe_dump(data, sort_keys=False, default_flow_style=None, allow_unicode=True, width=110)
+    path.write_text(text, encoding="utf-8")
 
 
 def load(root):
@@ -84,7 +96,8 @@ def new_project(root, gid):
          "characters": {"player": blank("characters", "player")}, "strings": {"en": {"str_title": gid}},
          "game": {"spec_version": SPEC_VERSION, "id": gid, "title": "str_title", "resolution": [640, 360], "lang": "en",
                   "player": "player", "verbs": ["walk", "look", "talk", "use", "take"], "flags": {}, "ending": "",
-                  "start": {"location": "", "mark": "", "inventory": [], "characters": {}}, "defaults": {}, "combinations": []}}
+                  "start": {"location": "", "mark": "", "inventory": [], "characters": {}}, "defaults": {}, "combinations": [],
+                  "interface": dict(UI_DEFAULTS)}}
     save(P)
     return P
 

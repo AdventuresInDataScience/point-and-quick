@@ -1,0 +1,5 @@
+id: hook
+name: str_hook
+icon: objects/hook/icon.png
+state: carried
+states: {carried: ""}

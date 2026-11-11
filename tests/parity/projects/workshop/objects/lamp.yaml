@@ -1,0 +1,9 @@
+# Used on its own from the inventory: pick "use", click the lamp, click it again.
+id: lamp
+name: str_lamp
+icon: objects/lamp/icon.png
+state: carried
+states: {carried: ""}
+rules:
+  - verb: use
+    do: [{type: set_flag, flag: lamp_on}, {type: say, line: str_lamp_on}]

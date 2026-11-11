@@ -1,0 +1,22 @@
+# A one-room game for the parity scenarios (tests/parity/scenarios.yaml). It has no art: the
+# scenarios only exercise game logic, so the Check would flag the missing images.
+spec_version: "0.1"
+id: workshop
+title: str_title
+lang: en
+player: player
+verbs: [walk, look, talk, use, take]
+flags: {lamp_on: false, rope_hooked: false, noticed: false, cat_awake: false, petted: false}
+ending: petted
+start:
+  location: hall
+  mark: middle
+  inventory: [lamp, rope, hook]
+  characters:
+    cat: {location: hall, mark: rug}
+defaults:
+  look: str_default_look
+  use: str_default_use
+combinations:
+  - items: [rope, hook]
+    do: [{type: set_flag, flag: rope_hooked}]

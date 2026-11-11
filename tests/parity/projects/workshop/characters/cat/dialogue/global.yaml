@@ -1,0 +1,3 @@
+start: hi
+nodes:
+  hi: {say: str_cat_hi, do: [{type: set_flag, flag: petted}]}

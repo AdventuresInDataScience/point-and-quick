@@ -1,8 +1,12 @@
-//! main.rs — window and loop, asset streaming, walking, audio, input and drawing.
-//! The game rules live in logic.rs; the spec's data types and file reading in spec.rs.
+//! main.rs — window and loop, asset streaming, walking, audio, and drawing the room.
+//! The game rules live in logic.rs, the interface (input, verbs, inventory, speech, dialogue
+//! options) in ui.rs, and the spec's data types and file reading in spec.rs.
 //! Run:  cargo run --release -- path/to/game.zip
 mod logic;
 mod spec;
+#[cfg(test)]
+mod tests;
+mod ui;
 
 use kira::manager::{backend::DefaultBackend, AudioManager, AudioManagerSettings};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings};
@@ -19,7 +23,6 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
 const CELL: f32 = 4.0; // walk-grid cell size, in game pixels
-const UI_H: f32 = 64.0; // height of the verb/inventory panel under the scene
 const TEXT: f32 = 16.0; // speech text size
 
 /// (scale, x offset, y offset): game pixels -> window pixels. The game is drawn at its own
@@ -55,19 +58,38 @@ pub struct G {
     pub verb: String,
     pub item: String,                             // item picked for "use X with ..."
     pub arrive: Option<(String, String, String)>, // (verb, target, item) to do on reaching the target
+    pub press: Option<ui::Press>,                 // ring style: a left press not yet let go
+    pub inv_open: bool,                           // ring style: the inventory is showing
     pub tex: HashMap<String, Texture2D>,          // character sheets and icons, loaded once
     pub rooms: HashMap<String, Room>,             // the current room and its map neighbours
     pub pending: Vec<String>,                     // rooms the loader thread is working on
     pub tx: Sender<(String, Vec<(String, String)>)>,
     pub rx: Receiver<(String, HashMap<String, Image>)>,
-    pub audio: AudioManager<DefaultBackend>,
-    pub music: Option<StreamingSoundHandle<FromFileError>>,
-    pub music_file: String,
-    pub music_bus: TrackHandle,
-    pub sfx_bus: TrackHandle,
+    pub audio: Option<Audio>,                     // None without a sound device (and in the tests)
+    pub music_file: String,                       // the track that should be playing ("" = none)
+    pub music_fade: f32,                          // its fade-in, in seconds
     pub volume: f64,
     pub t: f32,
     pub ended: bool,
+}
+
+/// Sound output: kira's manager, the playing music, and separate music and sfx buses so each has
+/// its own volume. Files are read and decoded on a thread of their own (see audio_loader).
+pub struct Audio {
+    pub manager: AudioManager<DefaultBackend>,
+    pub music: Option<StreamingSoundHandle<FromFileError>>,
+    pub music_bus: TrackHandle,
+    pub sfx_bus: TrackHandle,
+    pub sounds: HashMap<String, StaticSoundData>, // decoded effects, kept for replays (voice lines aren't)
+    pub tx: Sender<(String, bool)>,               // (file, is music) for the audio thread
+    pub rx: Receiver<Loaded>,
+}
+
+/// What the audio thread sends back: a music file's bytes (kira decodes music as it streams), or
+/// a fully decoded effect.
+pub enum Loaded {
+    Music(String, Vec<u8>),
+    Effect(String, StaticSoundData),
 }
 
 // ---------------- small lookups ----------------
@@ -128,14 +150,15 @@ fn dir_of(d: Vec2) -> usize {
     ((d.y.atan2(d.x).to_degrees() / 45.0).round() as i32).rem_euclid(8) as usize
 }
 
+// GAME_KEY: Option<(masked key, mask)>, written by build.rs from the GAME_KEY environment variable.
+include!(concat!(env!("OUT_DIR"), "/key.rs"));
+
 /// The game key is compiled in:  GAME_KEY=<hex from the editor's export> cargo build --release
 fn compiled_key() -> Vec<u8> {
-    let hex = option_env!("GAME_KEY").expect("this game is encrypted: build the engine with GAME_KEY=<key from the editor>");
-    let mut key = vec![];
-    for i in (0..hex.len()).step_by(2) {
-        key.push(u8::from_str_radix(&hex[i..i + 2], 16).unwrap());
-    }
-    key
+    let (masked, mask) = GAME_KEY.expect("this game is encrypted: build the engine with GAME_KEY=<key from the editor>");
+    // black_box stops the compiler undoing the mask at build time and storing the plain key
+    let mask = std::hint::black_box(mask);
+    masked.iter().zip(mask.iter()).map(|(a, b)| a ^ b).collect()
 }
 
 // ---------------- assets ----------------
@@ -205,6 +228,13 @@ fn pump(g: &mut G) {
         t.set_filter(FilterMode::Nearest);
         tex.insert(name, t);
     }
+    let (walk, gw, gh) = bake_walk(&masks, size);
+    g.rooms.insert(loc, Room { tex, masks, walk, gw, gh });
+}
+
+/// The walk grid for a room of the given size: a cell is walkable where the walkway mask is
+/// light at its centre. Returns (cells, width, height).
+fn bake_walk(masks: &HashMap<String, Image>, size: Vec2) -> (Vec<bool>, usize, usize) {
     let (gw, gh) = ((size.x / CELL) as usize, (size.y / CELL) as usize);
     let mut walk = vec![true; gw * gh]; // no walkway mask: walk anywhere
     if let Some(m) = masks.get("walk") {
@@ -215,26 +245,30 @@ fn pump(g: &mut G) {
             }
         }
     }
-    g.rooms.insert(loc, Room { tex, masks, walk, gw, gh });
+    (walk, gw, gh)
 }
 
-/// Character sheets and inventory icons are small and needed everywhere: load them once.
+/// Character sheets, inventory icons and verb icons are small and needed everywhere: load them
+/// once. Sprites keep hard pixel edges; verb icons are smoothed, since they're scaled to fit.
 fn load_globals(g: &mut G) {
     let mut paths = vec![];
     for c in g.spec.characters.values() {
         for a in c.animations.values() {
-            paths.push(a.sheet.clone());
+            paths.push((a.sheet.clone(), FilterMode::Nearest));
         }
     }
     for o in g.spec.objects.values() {
         if !o.icon.is_empty() {
-            paths.push(o.icon.clone());
+            paths.push((o.icon.clone(), FilterMode::Nearest));
         }
     }
-    for p in paths {
+    for icon in g.spec.game.interface.icons.values() {
+        paths.push((icon.clone(), FilterMode::Linear));
+    }
+    for (p, filter) in paths {
         let img = Image::from_file_with_format(&spec::read(&g.zip, &p, &g.key), None).expect(&p);
         let t = Texture2D::from_image(&img);
-        t.set_filter(FilterMode::Nearest);
+        t.set_filter(filter);
         g.tex.insert(p, t);
     }
 }
@@ -269,10 +303,24 @@ fn place_all(g: &mut G) {
     let player = g.spec.game.player.clone();
     let p = mark_pos(g, &g.st.mark);
     g.pos.insert(player, p);
-    for (c, mark, facing) in logic::npcs_here(g) {
-        let p = mark_pos(g, &mark);
-        g.pos.insert(c.clone(), p);
-        g.dir.insert(c, facing_dir(&facing));
+    sync_npcs(g);
+}
+
+/// Keep the characters on screen in step with logic::npcs_here, every frame: an NPC whose placement
+/// condition stops holding leaves, and one whose condition starts holding appears at its mark.
+/// check.py's solver treats placement conditions as live in the same way.
+fn sync_npcs(g: &mut G) {
+    let here = logic::npcs_here(g);
+    let player = g.spec.game.player.clone();
+    g.pos.retain(|c, _| *c == player || here.iter().any(|(h, _, _)| h == c));
+    let pos = &g.pos;
+    g.path.retain(|c, _| pos.contains_key(c));
+    for (c, mark, facing) in here {
+        if !g.pos.contains_key(&c) {
+            let p = mark_pos(g, &mark);
+            g.pos.insert(c.clone(), p);
+            g.dir.insert(c, facing_dir(&facing));
+        }
     }
 }
 
@@ -462,130 +510,134 @@ fn target_at(g: &G, p: Vec2) -> String {
     object_at(g, p)
 }
 
-// panel layout, in game pixels below the scene
-fn verb_rect(g: &G, i: usize) -> Rect {
-    Rect::new(8.0 + (i % 3) as f32 * 76.0, res(g).1 + 18.0 + (i / 3) as f32 * 20.0, 72.0, 18.0)
-}
-fn inv_rect(g: &G, i: usize) -> Rect {
-    Rect::new(250.0 + i as f32 * 40.0, res(g).1 + 20.0, 36.0, 36.0)
-}
-fn option_rect(g: &G, i: usize, n: usize) -> Rect {
-    let (w, h) = res(g);
-    let top = (h + 4.0).min(h + UI_H - 4.0 - n as f32 * 15.0); // long menus grow up over the scene
-    Rect::new(8.0, top + i as f32 * 15.0, w - 16.0, 15.0)
-}
-
 // ---------------- audio ----------------
 
-/// Crossfade to a music track, streamed from the zip. "" stops the music.
-pub fn play_music(g: &mut G, file: &str, fade: f32) {
+fn fade(secs: f32) -> Tween {
+    Tween { duration: Duration::from_secs_f32(secs.max(0.01)), ..Default::default() }
+}
+
+/// Open the sound device and start the audio thread. Without a device the game runs silent.
+fn start_audio(zip: &str, key: &Option<Vec<u8>>) -> Option<Audio> {
+    let mut manager = match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("no sound: {e}");
+            return None;
+        }
+    };
+    let music_bus = manager.add_sub_track(TrackBuilder::new()).ok()?;
+    let sfx_bus = manager.add_sub_track(TrackBuilder::new()).ok()?;
+    let (tx, jobs) = channel();
+    let (done, rx) = channel();
+    let (zip, key) = (zip.to_string(), key.clone());
+    std::thread::spawn(move || audio_loader(zip, key, jobs, done));
+    Some(Audio { manager, music: None, music_bus, sfx_bus, sounds: HashMap::new(), tx, rx })
+}
+
+/// Background thread: read and decrypt sound files, and decode effects in full, so the frame loop
+/// never stalls on audio. Music goes back as bytes, since kira decodes it while it streams.
+fn audio_loader(zip: String, key: Option<Vec<u8>>, jobs: Receiver<(String, bool)>, done: Sender<Loaded>) {
+    for (file, music) in jobs {
+        let bytes = spec::read(&zip, &file, &key);
+        let loaded = if music {
+            Loaded::Music(file, bytes)
+        } else {
+            match StaticSoundData::from_cursor(Cursor::new(bytes), StaticSoundSettings::default()) {
+                Ok(data) => Loaded::Effect(file, data),
+                Err(e) => {
+                    eprintln!("can't decode {file}: {e}");
+                    continue;
+                }
+            }
+        };
+        if done.send(loaded).is_err() {
+            return;
+        }
+    }
+}
+
+/// Crossfade to a music track: the old one fades out now, and the new one fades in once the audio
+/// thread has read it (see pump_audio). "" stops the music.
+pub fn play_music(g: &mut G, file: &str, secs: f32) {
     if file == g.music_file {
         return;
     }
-    let tween = Tween { duration: Duration::from_secs_f32(fade.max(0.01)), ..Default::default() };
-    if let Some(m) = g.music.as_mut() {
-        m.stop(tween).ok(); // fades out while the new track fades in
-    }
-    g.music = None;
     g.music_file = file.to_string();
-    if file.is_empty() {
-        return;
+    g.music_fade = secs;
+    let Some(a) = g.audio.as_mut() else { return };
+    if let Some(m) = a.music.as_mut() {
+        m.stop(fade(secs)).ok();
     }
-    let bytes = spec::read(&g.zip, file, &g.key);
-    let settings = StreamingSoundSettings::new().loop_region(..).fade_in_tween(tween).output_destination(&g.music_bus);
-    let data = StreamingSoundData::from_cursor(Cursor::new(bytes), settings).expect(file);
-    g.music = g.audio.play(data).ok();
+    a.music = None;
+    if logic::has(&g.spec.header.files, file) {
+        a.tx.send((file.to_string(), true)).ok();
+    }
 }
 
-/// Play a sound effect or voice line, if the bundle has it.
+/// Play a sound effect or voice line, if the bundle has it. An effect plays at once if it has been
+/// decoded before; otherwise it plays as soon as the audio thread has decoded it.
 pub fn play_sound(g: &mut G, file: &str) {
-    if !g.spec.header.files.iter().any(|f| f == file) {
-        return;
+    let Some(a) = g.audio.as_mut() else { return };
+    if let Some(data) = a.sounds.get(file) {
+        a.manager.play(data.clone()).ok();
+    } else if logic::has(&g.spec.header.files, file) {
+        a.tx.send((file.to_string(), false)).ok();
     }
-    let bytes = spec::read(&g.zip, file, &g.key);
-    let settings = StaticSoundSettings::new().output_destination(&g.sfx_bus);
-    let data = StaticSoundData::from_cursor(Cursor::new(bytes), settings).expect(file);
-    g.audio.play(data).ok();
 }
 
-// ---------------- input ----------------
+/// Play whatever the audio thread has finished: effects right away (and kept, except voice lines,
+/// which are said once each), and music if it's still the track that should be playing.
+fn pump_audio(g: &mut G) {
+    let Some(a) = g.audio.as_mut() else { return };
+    while let Ok(loaded) = a.rx.try_recv() {
+        match loaded {
+            Loaded::Effect(file, data) => {
+                let data = data.with_modified_settings(|s| s.output_destination(&a.sfx_bus));
+                a.manager.play(data.clone()).ok();
+                if !file.starts_with("voice/") {
+                    a.sounds.insert(file, data);
+                }
+            }
+            Loaded::Music(file, bytes) => {
+                if file != g.music_file {
+                    continue; // the room changed again while it was loading
+                }
+                let settings = StreamingSoundSettings::new().loop_region(..).fade_in_tween(fade(g.music_fade)).output_destination(&a.music_bus);
+                match StreamingSoundData::from_cursor(Cursor::new(bytes), settings) {
+                    Ok(data) => a.music = a.manager.play(data).ok(),
+                    Err(e) => eprintln!("can't play {file}: {e}"),
+                }
+            }
+        }
+    }
+}
+
+// ---------------- acting on clicks (ui.rs decides what was clicked) ----------------
 
 fn reset_verb(g: &mut G) {
     g.verb = "walk".to_string();
     g.item.clear();
 }
 
-/// Mouse: left uses the selected verb, right looks. Panel clicks pick verbs and inventory items.
-fn input(g: &mut G, mouse: Vec2) {
-    let (left, right) = (is_mouse_button_pressed(MouseButton::Left), is_mouse_button_pressed(MouseButton::Right));
-    if !(left || right) || g.ended {
-        return;
-    }
-    if g.speech.is_some() {
-        g.speech = None; // a click skips the current line
-        return;
-    }
-    if logic::busy(g) || !g.queue.is_empty() {
-        return; // a cutscene is playing
-    }
-    let player = g.spec.game.player.clone();
-    let h = res(g).1;
-    if g.menu.is_some() {
-        let opts = logic::options(g);
-        for (i, o) in opts.iter().enumerate() {
-            if option_rect(g, i, opts.len()).contains(mouse) {
-                logic::choose(g, o);
-                return;
-            }
-        }
-        return;
-    }
-    if mouse.y >= h {
-        for (i, v) in g.spec.game.verbs.clone().iter().enumerate() {
-            if verb_rect(g, i).contains(mouse) {
-                g.verb = v.clone();
-                g.item.clear();
-                return;
-            }
-        }
-        for (i, it) in g.st.inventory.clone().iter().enumerate() {
-            if !inv_rect(g, i).contains(mouse) {
-                continue;
-            }
-            let verb = if right { "look".to_string() } else { g.verb.clone() };
-            if verb == "use" && g.item.is_empty() {
-                g.item = it.clone(); // "Use Key with ..." now waits for a target
-                return;
-            }
-            let item = g.item.clone();
-            logic::interact(g, &verb, it, &item);
-            reset_verb(g);
-            return;
-        }
-        return;
-    }
-    let target = target_at(g, mouse);
-    if target.is_empty() {
-        walk_to(g, &player, mouse);
-        g.arrive = None;
-        return;
-    }
-    if right || g.verb == "look" {
-        logic::interact(g, "look", &target, "");
+/// Use a verb on a target in the scene (with the picked item, if any). Looking happens on the spot;
+/// anything else walks up to the target first (its hotspot mark, or beside a character), then acts.
+fn click_target(g: &mut G, verb: &str, target: &str) {
+    if verb == "look" {
+        logic::interact(g, "look", target, "");
         reset_verb(g);
         return;
     }
-    // walk up to the target first: an object's hotspot mark, or beside a character
-    let dest = match g.spec.locations[&g.st.location].hotspots.get(&target) {
+    let player = g.spec.game.player.clone();
+    let dest = match g.spec.locations[&g.st.location].hotspots.get(target) {
         Some(hs) => mark_pos(g, &hs.mark),
         None => {
-            let (c, p) = (g.pos[&target], g.pos[&player]);
+            let (c, p) = (g.pos[target], g.pos[&player]);
             let side = if p.x < c.x { -36.0 } else { 36.0 };
             vec2(c.x + side * depth_scale(g, c), c.y)
         }
     };
     walk_to(g, &player, dest);
-    g.arrive = Some((g.verb.clone(), target, g.item.clone()));
+    g.arrive = Some((verb.to_string(), target.to_string(), g.item.clone()));
     reset_verb(g);
 }
 
@@ -601,18 +653,27 @@ fn keys(g: &mut G) {
     if is_key_pressed(KeyCode::F9) {
         if let Some(st) = spec::load_save(&g.spec, &g.key) {
             g.st = st;
+            // drop everything that was mid-way when the player loaded, including a room change
             g.queue.clear();
             g.menu = None;
             g.speech = None;
             g.arrive = None;
             g.ended = false;
+            g.fade_edge.clear();
+            g.wait = 0.0;
+            g.cut_walk = false;
+            g.press = None;
+            g.inv_open = false;
+            reset_verb(g);
             room_changed(g);
         }
     }
     let step = if is_key_pressed(KeyCode::RightBracket) { 0.1 } else if is_key_pressed(KeyCode::LeftBracket) { -0.1 } else { 0.0 };
     if step != 0.0 {
         g.volume = (g.volume + step).clamp(0.0, 1.0);
-        g.music_bus.set_volume(Volume::Amplitude(g.volume), Tween::default()).ok();
+        if let Some(a) = g.audio.as_mut() {
+            a.music_bus.set_volume(Volume::Amplitude(g.volume), Tween::default()).ok();
+        }
     }
 }
 
@@ -643,6 +704,7 @@ fn update(g: &mut G, dt: f32) {
     }
     logic::run_queue(g);
     logic::update_menu(g);
+    sync_npcs(g);
     // fade out, switch rooms at black, fade back in once the new room has loaded
     if !g.fade_edge.is_empty() {
         g.fade = (g.fade + dt * 3.0).min(1.0);
@@ -731,82 +793,20 @@ fn draw_room(g: &G, room: &Room, v: View) {
     }
 }
 
-/// The current line, wrapped, above the speaker's head in their colour.
-fn draw_speech(g: &G, v: View) {
-    let Some((who, line, _)) = &g.speech else { return };
-    let w = res(g).0;
-    let r = if g.pos.contains_key(who) { char_rect(g, who) } else { Rect::new(w / 2.0, 40.0, 0.0, 0.0) };
-    let color = g.spec.characters.get(who).map(|c| hex_color(&c.text_color)).unwrap_or(WHITE);
-    let lines = wrap(line, 42);
-    for (i, l) in lines.iter().enumerate() {
-        let tw = text_w(l, TEXT);
-        let x = (r.x + r.w / 2.0 - tw / 2.0).clamp(4.0, (w - tw - 4.0).max(4.0));
-        let y = (r.y - 6.0 - (lines.len() - 1 - i) as f32 * TEXT).max(TEXT);
-        text_at(l, x, y, TEXT, color, v);
-    }
-}
-
-/// The panel: dialogue options when a conversation is open, else the sentence line, verbs and inventory.
-fn draw_panel(g: &G, mouse: Vec2, v: View) {
-    let (w, h) = res(g);
-    let bg = Color::from_rgba(24, 22, 34, 255);
-    box_at(Rect::new(0.0, h, w, UI_H), bg, v);
-    if g.menu.is_some() {
-        if logic::busy(g) || !g.queue.is_empty() {
-            return;
-        }
-        let opts = logic::options(g);
-        for (i, o) in opts.iter().enumerate() {
-            let r = option_rect(g, i, opts.len());
-            box_at(r, bg, v);
-            text_at(&text(g, &o.line), r.x, r.y + 12.0, 14.0, if r.contains(mouse) { YELLOW } else { WHITE }, v);
-        }
-        return;
-    }
-    let mut hover = if mouse.y < h { target_at(g, mouse) } else { String::new() };
-    for (i, it) in g.st.inventory.iter().enumerate() {
-        if inv_rect(g, i).contains(mouse) {
-            hover = it.clone();
-        }
-    }
-    let mut sentence = verb_label(g, &g.verb);
-    if !g.item.is_empty() {
-        sentence += &format!(" {} with", name(g, &g.item));
-    }
-    if !hover.is_empty() {
-        sentence += &format!(" {}", name(g, &hover));
-    }
-    text_at(&sentence, 8.0, h + 13.0, 14.0, Color::from_rgba(150, 200, 255, 255), v);
-    for (i, verb) in g.spec.game.verbs.iter().enumerate() {
-        let r = verb_rect(g, i);
-        let lit = *verb == g.verb || r.contains(mouse);
-        text_at(&verb_label(g, verb), r.x, r.y + 13.0, 14.0, if lit { YELLOW } else { WHITE }, v);
-    }
-    for (i, it) in g.st.inventory.iter().enumerate() {
-        let r = inv_rect(g, i);
-        box_at(r, if *it == g.item { Color::from_rgba(90, 80, 40, 255) } else { Color::from_rgba(44, 42, 60, 255) }, v);
-        let icon = g.spec.objects.get(it).map(|o| o.icon.clone()).unwrap_or_default();
-        if let Some(t) = g.tex.get(&icon) {
-            let s = (32.0 / t.width()).min(32.0 / t.height());
-            let (iw, ih) = (t.width() * s, t.height() * s);
-            tex_at(t, Rect::new(r.x + 18.0 - iw / 2.0, r.y + 18.0 - ih / 2.0, iw, ih), None, false, v);
-        }
-    }
-}
-
-fn draw(g: &G, mouse: Vec2, v: View) {
+/// The frame: the room, then the interface (see ui.rs), then any fade and the ending.
+fn draw(g: &G, mouse: ui::Mouse, v: View) {
     let (w, h) = res(g);
     match g.rooms.get(&g.st.location) {
         Some(room) => draw_room(g, room, v),
         None => text_at("Loading...", w / 2.0 - 30.0, h / 2.0, TEXT, WHITE, v),
     }
-    draw_speech(g, v);
-    draw_panel(g, mouse, v);
+    ui::draw_ui(g, mouse, v);
+    let all = Rect::new(0.0, 0.0, w, h + ui::ui_h(g));
     if g.fade > 0.0 {
-        box_at(Rect::new(0.0, 0.0, w, h + UI_H), Color::new(0.0, 0.0, 0.0, g.fade), v);
+        box_at(all, Color::new(0.0, 0.0, 0.0, g.fade), v);
     }
     if g.ended {
-        box_at(Rect::new(0.0, 0.0, w, h + UI_H), Color::new(0.0, 0.0, 0.0, 0.6), v);
+        box_at(all, Color::new(0.0, 0.0, 0.0, 0.6), v);
         let end = g.spec.strings.get("str_the_end").cloned().unwrap_or("The End".to_string());
         text_at(&end, w / 2.0 - text_w(&end, 32.0) / 2.0, h / 2.0, 32.0, WHITE, v);
     }
@@ -818,55 +818,67 @@ fn conf() -> Conf {
     Conf { window_title: "Point & Click".to_string(), window_width: 1280, window_height: 848, high_dpi: true, ..Default::default() }
 }
 
-#[macroquad::main(conf)]
-async fn main() {
-    let zip = std::env::args().nth(1).unwrap_or("game.zip".to_string());
-    let header: Header = serde_json::from_slice(&spec::read(&zip, "header.json", &None)).expect("header.json");
+/// Read the game zip and set up everything that doesn't need a window. `live` also starts the
+/// asset loader thread and audio; the tests run without them.
+fn boot(zip: &str, live: bool) -> G {
+    let header: Header = serde_json::from_slice(&spec::read(zip, "header.json", &None)).expect("header.json");
     if header.spec_version != spec::SPEC_VERSION {
         panic!("this engine runs spec {}, the game is spec {}", spec::SPEC_VERSION, header.spec_version);
     }
     let key = if header.encrypted { Some(compiled_key()) } else { None };
-    let spec = spec::load(&zip, &key, header);
+    let spec = spec::load(zip, &key, header);
     let st = spec::new_state(&spec);
 
     // asset loader thread: jobs go in as (room, files), decoded images come back
     let (tx, jobs) = channel();
     let (done, rx) = channel();
-    let (zip2, key2) = (zip.clone(), key.clone());
-    std::thread::spawn(move || loader(zip2, key2, jobs, done));
-
-    // audio: separate music and sfx buses, so each has its own volume
-    let mut audio = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).expect("no audio device");
-    let music_bus = audio.add_sub_track(TrackBuilder::new()).unwrap();
-    let sfx_bus = audio.add_sub_track(TrackBuilder::new()).unwrap();
-
-    let mut g = G {
-        spec, st, zip, key,
+    let mut audio = None;
+    if live {
+        let (zip2, key2) = (zip.to_string(), key.clone());
+        std::thread::spawn(move || loader(zip2, key2, jobs, done));
+        audio = start_audio(zip, &key);
+    }
+    G {
+        spec, st, zip: zip.to_string(), key,
         queue: vec![], speech: None, menu: None, wait: 0.0, cut_walk: false, fade: 1.0, fade_edge: String::new(),
         pos: HashMap::new(), path: HashMap::new(), dir: HashMap::new(),
-        verb: "walk".to_string(), item: String::new(), arrive: None,
+        verb: "walk".to_string(), item: String::new(), arrive: None, press: None, inv_open: false,
         tex: HashMap::new(), rooms: HashMap::new(), pending: vec![], tx, rx,
-        audio, music: None, music_file: String::new(), music_bus, sfx_bus, volume: 1.0,
+        audio, music_file: String::new(), music_fade: 1.0, volume: 1.0,
         t: 0.0, ended: false,
-    };
+    }
+}
+
+#[macroquad::main(conf)]
+async fn main() {
+    let zip = std::env::args().nth(1).unwrap_or("game.zip".to_string());
+    let mut g = boot(&zip, true);
     load_globals(&mut g);
     let (loc, mark) = (g.st.location.clone(), g.st.mark.clone());
     logic::enter(&mut g, &loc, &mark);
+    let mut auto = ui::Autoplay::from_env(); // a dev tool: a scripted mouse, and screenshots
 
     loop {
         let dt = get_frame_time().min(0.1);
         g.t += dt;
         pump(&mut g);
+        pump_audio(&mut g);
         let (w, h) = res(&g);
-        let s = (screen_width() / w).min(screen_height() / (h + UI_H));
-        let v = (s, (screen_width() - w * s) / 2.0, (screen_height() - (h + UI_H) * s) / 2.0);
-        let (mx, my) = mouse_position();
-        let mouse = vec2((mx - v.1) / s, (my - v.2) / s);
+        let full_h = h + ui::ui_h(&g);
+        let s = (screen_width() / w).min(screen_height() / full_h);
+        let v = (s, (screen_width() - w * s) / 2.0, (screen_height() - full_h * s) / 2.0);
+        let mouse = match auto.as_mut() {
+            Some(a) => a.step(dt),
+            None => ui::Mouse::read(v),
+        };
         update(&mut g, dt);
         keys(&mut g);
-        input(&mut g, mouse);
+        ui::input(&mut g, mouse);
         clear_background(BLACK);
         draw(&g, mouse, v);
+        if let Some(file) = auto.as_mut().and_then(|a| a.shot.take()) {
+            get_screen_data().export_png(&file);
+        }
         next_frame().await;
     }
 }

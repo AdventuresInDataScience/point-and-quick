@@ -2,7 +2,7 @@
 Run: python editor/demo_assets.py   (already run once; outputs are committed)"""
 import math, struct, wave
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 D = Path(__file__).parent / "projects/demo"
 W, H = 640, 360
@@ -132,4 +132,52 @@ write_wav("music/street.wav", melody([60, 64, 67, 72, 67, 64, 62, 65, 69, 74, 69
 write_wav("music/house.wav", melody([57, 60, 64, 60, 55, 59, 62, 59], 0.6))
 write_wav("sfx/creak.wav", [math.sin(2 * math.pi * (180 + 300 * i / RATE) * i / RATE) * (1 - i / (RATE * .6)) for i in range(int(RATE * .6))])
 write_wav("sfx/pickup.wav", melody([84, 88], 0.12))
+
+
+# ---------- verb icons for the interface: 48x48 (drawn at 24 game px, so sharp at 2x) ----------
+# Each is drawn as a white-on-black mask at 4x, given a dark outline by dilating the mask, then
+# scaled down. Coordinates are on the 48-pixel grid; fill=0 cuts a hole.
+def icon(rel, draw):
+    S = 4
+    m = Image.new("L", (48 * S, 48 * S), 0)
+    draw(ImageDraw.Draw(m), lambda *v: [c * S for c in v])
+    im = Image.new("RGBA", m.size, (0, 0, 0, 0))
+    im.paste((30, 26, 40, 255), mask=m.filter(ImageFilter.MaxFilter(13)))   # ~1.5 px outline
+    im.paste((240, 232, 210, 255), mask=m)
+    save(im.resize((48, 48), Image.LANCZOS), rel)
+
+
+def walk_icon(d, s):        # two footprints
+    for x, y in [(8, 14), (28, 6)]:
+        d.ellipse(s(x, y, x + 12, y + 14), fill=255); d.ellipse(s(x + 2, y + 16, x + 10, y + 26), fill=255)
+
+
+def look_icon(d, s):        # an eye
+    t = [i / 20 for i in range(21)]
+    d.polygon([tuple(s(5 + 38 * u, 24 - 13 * math.sin(math.pi * u))) for u in t] +
+              [tuple(s(5 + 38 * u, 24 + 13 * math.sin(math.pi * u))) for u in reversed(t)], fill=255)
+    d.ellipse(s(16, 16, 32, 32), fill=0); d.ellipse(s(20, 20, 28, 28), fill=255)
+
+
+def talk_icon(d, s):        # a speech bubble
+    d.rounded_rectangle(s(5, 7, 43, 33), radius=8 * 4, fill=255)
+    d.polygon([tuple(s(13, 30)), tuple(s(10, 43)), tuple(s(24, 32))], fill=255)
+    for x in (15, 24, 33): d.ellipse(s(x - 3, 17, x + 3, 23), fill=0)
+
+
+def use_icon(d, s):         # a cog
+    for k in range(8):
+        a = k * math.pi / 4
+        pts = [(r * math.cos(a) - w * math.sin(a), r * math.sin(a) + w * math.cos(a)) for r, w in [(12, -4), (21, -3.5), (21, 3.5), (12, 4)]]
+        d.polygon([tuple(s(24 + x, 24 + y)) for x, y in pts], fill=255)
+    d.ellipse(s(9, 9, 39, 39), fill=255); d.ellipse(s(18, 18, 30, 30), fill=0)
+
+
+def take_icon(d, s):        # an arrow lifting out of a tray
+    d.rectangle(s(7, 30, 41, 43), fill=255); d.rectangle(s(12, 30, 36, 38), fill=0)
+    d.rectangle(s(20, 14, 28, 33), fill=255); d.polygon([tuple(s(10, 18)), tuple(s(24, 3)), tuple(s(38, 18))], fill=255)
+
+
+for verb, fn in [("walk", walk_icon), ("look", look_icon), ("talk", talk_icon), ("use", use_icon), ("take", take_icon)]:
+    icon(f"ui/{verb}.png", fn)
 print("demo assets written to", D)
