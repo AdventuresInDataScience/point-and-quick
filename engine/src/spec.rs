@@ -408,14 +408,11 @@ pub fn write_save(dir: &Path, slot: &str, st: &State, key: &Option<Vec<u8>>) -> 
 }
 
 /// Read a save slot: its state, brought up to date with the spec (see migrate), and when it was
-/// saved. A save from before slots (a bare state) still loads, saved at an unknown time (0).
+/// saved.
 pub fn read_save(dir: &Path, slot: &str, spec: &Spec, key: &Option<Vec<u8>>) -> Option<(State, u64)> {
     let bytes = std::fs::read(dir.join(format!("{slot}.sav"))).ok()?;
     let json = match key { Some(k) => decrypt(&bytes, k)?, None => bytes };
-    let (mut st, at) = match serde_json::from_slice::<Save>(&json) {
-        Ok(s) => (s.state, s.saved_at),
-        Err(_) => (serde_json::from_slice::<State>(&json).ok()?, 0),
-    };
-    migrate(spec, &mut st);
-    Some((st, at))
+    let mut save: Save = serde_json::from_slice(&json).ok()?;
+    migrate(spec, &mut save.state);
+    Some((save.state, save.saved_at))
 }

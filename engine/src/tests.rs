@@ -425,7 +425,7 @@ fn saving_waits_until_the_game_is_waiting_for_the_player() {
 }
 
 #[test]
-fn entering_a_room_autosaves_and_old_saves_still_load() {
+fn entering_a_room_autosaves() {
     let mut g = demo("bar", "words");
     g.saves = temp_saves("auto");
     for mv in ["take key", "talk guard", "say 'str_opt_who'", "say 'str_opt_cat'", "use key on door", "walk door"] {
@@ -433,12 +433,13 @@ fn entering_a_room_autosaves_and_old_saves_still_load() {
     }
     let (st, at) = spec::read_save(&g.saves, "auto", &g.spec, &g.key).expect("an autosave");
     assert!(st.location == "house" && at > 0);
-    // a save from before slots was a bare state; it still loads
-    let mut old = spec::new_state(&g.spec);
-    old.inventory = vec!["key".into()];
-    std::fs::write(g.saves.join("quick.sav"), serde_json::to_vec(&old).unwrap()).unwrap();
-    assert!(load_slot(&mut g, "quick"));
-    assert!(g.st.location == "street" && carried(&g, "key"));
+    // going back out to the street autosaves again, over it: the autosave follows the player
+    play(&mut g, "walk house_door");
+    assert_eq!(spec::read_save(&g.saves, "auto", &g.spec, &g.key).unwrap().0.location, "street");
+    // and it loads: whatever happens next is undone
+    g.st.inventory.push("cake".into());
+    assert!(load_slot(&mut g, "auto"));
+    assert!(g.st.location == "street" && !carried(&g, "cake"));
     std::fs::remove_dir_all(&g.saves).ok();
     std::fs::remove_file(&g.zip).ok();
 }

@@ -1,13 +1,12 @@
-"""AI plugins. Each feature is one function that dispatches on a backend named in ai.yaml:
+"""AI plugins. Each feature is one function that dispatches on a backend named in the user's settings (see config.py):
 "onnx" runs a local model through ONNX Runtime, "remote" posts to an HTTP API, "none" is off.
 Models are optional downloads; their libraries are only imported when a feature is used."""
 import base64, copy, hashlib, io, json, re, urllib.request, wave
 from pathlib import Path
-import numpy as np, yaml
+import numpy as np
 from PIL import Image
 import check, config, spec
 
-LEGACY = Path(__file__).parent / "ai.yaml"         # where these settings lived before settings.yaml
 _models = {}                         # loaded models, kept for the session
 
 
@@ -21,8 +20,7 @@ def defaults():
 
 def settings():
     """The AI backends, from the `ai` section of the user's settings.yaml (see config.py)."""
-    saved = config.settings().get("ai") or (yaml.safe_load(LEGACY.read_text(encoding="utf-8")) if LEGACY.is_file() else {})
-    return {**defaults(), **(saved or {})}
+    return {**defaults(), **(config.settings().get("ai") or {})}
 
 
 def save_settings(cfg): config.update(ai=cfg)

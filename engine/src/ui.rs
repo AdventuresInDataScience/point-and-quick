@@ -672,12 +672,11 @@ fn input_menu(g: &mut G, m: Mouse) {
     }
 }
 
-/// How long ago a save was made, roughly. Saves from before slots don't know ("").
+/// How long ago a save was made, roughly.
 fn ago(at: u64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let s = now.saturating_sub(at);
     match s {
-        _ if at == 0 => String::new(),
         0..=59 => "just now".to_string(),
         60..=3599 => format!("{} min ago", s / 60),
         3600..=86399 => format!("{} h ago", s / 3600),
@@ -704,8 +703,7 @@ fn menu_label(g: &G, action: &str) -> (String, String) {
         n => format!("{} {n}", text_or(g, "ui_slot", "Slot")),
     };
     let detail = match slot_info(g, slot) {
-        Some((room, at)) if *at > 0 => format!("{room} - {}", ago(*at)),
-        Some((room, _)) => room.clone(),
+        Some((room, at)) => format!("{room} - {}", ago(*at)),
         None => text_or(g, "ui_empty", "empty"),
     };
     (name, detail)

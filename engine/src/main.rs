@@ -941,11 +941,6 @@ fn boot(zip: &str, live: bool) -> G {
         std::thread::spawn(move || loader(zip2, key2, jobs, done));
         audio = start_audio(zip, &key);
         saves = spec::saves_dir(&spec.game.id);
-        // a save from before save slots (./saves/<id>.sav, next to the game) becomes the quicksave
-        let old = std::path::Path::new("saves").join(format!("{}.sav", spec.game.id));
-        if old.is_file() && !saves.join("quick.sav").exists() && std::fs::create_dir_all(&saves).is_ok() {
-            std::fs::copy(&old, saves.join("quick.sav")).ok();
-        }
     }
     G {
         spec, st, zip: zip.to_string(), key,

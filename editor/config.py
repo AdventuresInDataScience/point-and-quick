@@ -18,7 +18,6 @@ import spec
 
 HERE = Path(__file__).parent
 EXAMPLES = HERE / "examples"
-LEGACY = HERE / "projects"          # where projects lived before the folder could be set
 APP = "Point and Click Maker"
 FOLDERS = ("projects", "exports", "models")
 
@@ -88,18 +87,3 @@ def copy_example(name):
     if gid != name:                                   # its id has to match its folder
         P = spec.load(dest / gid); P["game"]["id"] = gid; spec.save(P)
     return gid
-
-
-def legacy_projects():
-    """Projects still in the editor's own folder (from before the projects folder could be set)."""
-    return projects(LEGACY) if LEGACY.resolve() != folder("projects").resolve() else []
-
-
-def move_legacy(names):
-    """Move projects from the editor's own folder into the projects folder (renaming any whose
-    name is taken there). Returns the new ids."""
-    dest, moved = folder("projects"), []
-    for name in names:
-        gid = free_id(dest, name); shutil.move(str(LEGACY / name), str(dest / gid)); moved.append(gid)
-        if gid != name: P = spec.load(dest / gid); P["game"]["id"] = gid; spec.save(P)
-    return moved

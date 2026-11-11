@@ -83,11 +83,6 @@ def set_folder(kind, default=False):
     S.settings_msg = ("success", f"{kind.capitalize()} now go in {config.settings()[kind]}.")
 
 
-def move_legacy():
-    moved = config.move_legacy(config.legacy_projects())
-    S.settings_msg = ("success", f"Moved {', '.join(moved)} to {config.folder('projects')}.")
-
-
 def settings_page():
     st.header("Settings")
     if not config.projects():
@@ -108,12 +103,6 @@ def settings_page():
     if os.environ.get("PNC_PROJECTS"): st.info(f"PNC_PROJECTS is set, so for now projects come from {os.environ['PNC_PROJECTS']}.")
     if S.get("settings_msg"):
         level, msg = S.pop("settings_msg"); (st.error if level == "error" else st.success)(msg)
-    legacy = config.legacy_projects()
-    if legacy:
-        st.subheader("Projects in the old location")
-        st.write(f"These are still in the editor's own folder ({config.LEGACY}), where projects used to be kept: "
-                 f"**{', '.join(legacy)}**. Move them into your projects folder to keep working on them.")
-        st.button("Move them to my projects folder", on_click=move_legacy, type="primary")
     st.subheader("Examples")
     st.caption("Games that come with the editor. Copying one makes a new project of your own; the example itself never changes.")
     for name in config.examples():

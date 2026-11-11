@@ -1,6 +1,5 @@
 """Where the editor keeps things (config.py): settings and folders outside the editor's own folder,
-folders that can be set, examples copied rather than edited, and projects moved out of the old
-location."""
+folders that can be set, and examples copied rather than edited."""
 from pathlib import Path
 import ai, config, spec
 
@@ -33,15 +32,6 @@ def test_copying_an_example_makes_a_new_project(monkeypatch, tmp_path):
     assert spec.load(tmp_path / "demo_2")["game"]["id"] == "demo_2"  # its id matches its folder
     assert config.projects() == ["demo", "demo_2"]
     assert (config.EXAMPLES / "demo/game.yaml").is_file()            # the example is still there
-
-
-def test_moving_projects_out_of_the_old_location(monkeypatch, tmp_path):
-    old, new = tmp_path / "old", tmp_path / "new"
-    spec.new_project(old / "space_ace", "space_ace"); spec.new_project(new / "space_ace", "space_ace")
-    monkeypatch.setattr(config, "LEGACY", old); monkeypatch.setenv("PNC_PROJECTS", str(new))
-    assert config.legacy_projects() == ["space_ace"]
-    assert config.move_legacy(["space_ace"]) == ["space_ace_2"]      # the name was taken there
-    assert config.legacy_projects() == [] and spec.load(new / "space_ace_2")["game"]["id"] == "space_ace_2"
 
 
 def test_ai_settings_live_in_the_settings_file():
