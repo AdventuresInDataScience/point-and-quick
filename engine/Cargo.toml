@@ -1,0 +1,17 @@
+[package]
+name = "pnc-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macroquad = { version = "0.4", default-features = false }   # no built-in audio: kira does that
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+aes-gcm = "0.10"
+kira = "0.8"
+
+# Decode PNGs and audio at a sensible speed even in debug builds.
+[profile.dev.package."*"]
+opt-level = 2

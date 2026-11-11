@@ -1,0 +1,16 @@
+id: key
+name: str_key
+icon: objects/key/icon.png
+state: here
+states: {here: objects/key/ground.png, gone: ""}
+rules:
+  - verb: take
+    do:
+      - {type: play_sound, file: sfx/pickup.wav}
+      - {type: give, item: key}
+      - {type: set_state, object: key, state: gone}
+      - {type: say, line: str_key_take}
+  - verb: look
+    do: [{type: say, line: str_key_look}]
+fallback:
+  use: str_key_no_fit

@@ -1,0 +1,13 @@
+streamlit>=1.37
+streamlit-image-coordinates>=0.1.9
+pyyaml>=6
+pillow>=10
+numpy>=1.26
+pandas>=2
+cryptography>=42
+jsonschema>=4.18
+
+# Optional AI backends (pick on the editor's AI assets page; none are needed to build games)
+# onnxruntime-genai>=0.9      # local LLM for rule authoring, with constrained JSON output
+# piper-tts>=1.3              # local character voices
+# optimum[onnxruntime]        # local Stable Diffusion for art and sprite sheets

@@ -1,0 +1,268 @@
+# JSON Schema (draft 2020-12) for spec v0.1, written as YAML for readability.
+# One $def per file kind. check.py validates each project file against its kind;
+# the engine's serde structs (engine/src/spec.rs) mirror the same shapes.
+# The schema checks *shape*; whether an ID actually exists is checked by check.py.
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: pnc-spec-0.1
+$defs:
+
+  # ---------- building blocks ----------
+  id: {type: string, pattern: "^[a-z][a-z0-9_]*$"}
+  xy: {type: array, items: {type: number}, minItems: 2, maxItems: 2}
+  lines: {type: object, additionalProperties: {type: string}}        # verb -> string id
+  conds: {type: array, items: {$ref: "#/$defs/cond"}}
+  acts: {type: array, items: {$ref: "#/$defs/action"}}
+
+  # A condition is a dict with a "type" key. Every condition in a list must hold.
+  # "is" defaults to true for the boolean ones.
+  cond:
+    oneOf:
+      - {type: object, additionalProperties: false, required: [type, flag],
+         properties: {type: {const: flag}, flag: {type: string}, is: {type: boolean}}}
+      - {type: object, additionalProperties: false, required: [type, object, is],
+         properties: {type: {const: state}, object: {type: string}, is: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, item],
+         properties: {type: {const: has}, item: {type: string}, is: {type: boolean}}}
+      - {type: object, additionalProperties: false, required: [type, character, location],
+         properties: {type: {const: at}, character: {type: string}, location: {type: string}, is: {type: boolean}}}
+      - {type: object, additionalProperties: false, required: [type, line],
+         properties: {type: {const: said}, line: {type: string}, is: {type: boolean}}}
+
+  # An action is a dict with a "type" key. Actions run in order; say/walk/wait block until done.
+  action:
+    oneOf:
+      - {type: object, additionalProperties: false, required: [type, line],
+         properties: {type: {const: say}, line: {type: string}, who: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, flag],
+         properties: {type: {const: set_flag}, flag: {type: string}, value: {type: boolean}}}
+      - {type: object, additionalProperties: false, required: [type, object, state],
+         properties: {type: {const: set_state}, object: {type: string}, state: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, item],
+         properties: {type: {const: give}, item: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, item],
+         properties: {type: {const: remove}, item: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, character, location],
+         properties: {type: {const: move}, character: {type: string}, location: {type: string}, mark: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, character, state],
+         properties: {type: {const: char_state}, character: {type: string}, state: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, edge],
+         properties: {type: {const: go}, edge: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, mark],
+         properties: {type: {const: walk}, mark: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, character],
+         properties: {type: {const: talk}, character: {type: string}, node: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, file],
+         properties: {type: {const: play_music}, file: {type: string}, fade: {type: number}}}
+      - {type: object, additionalProperties: false, required: [type, file],
+         properties: {type: {const: play_sound}, file: {type: string}}}
+      - {type: object, additionalProperties: false, required: [type, seconds],
+         properties: {type: {const: wait}, seconds: {type: number}}}
+
+  # "When VERB on TARGET (with ITEM), if CONDITIONS, do ACTIONS". The target is the sheet it lives on.
+  rule:
+    type: object
+    additionalProperties: false
+    required: [verb, do]
+    properties:
+      verb: {type: string}
+      with: {type: string}                 # the inventory item being used on the target
+      if: {$ref: "#/$defs/conds"}
+      do: {$ref: "#/$defs/acts"}
+
+  # Item-on-item combinations live in game.yaml; order of the two items doesn't matter.
+  combo:
+    type: object
+    additionalProperties: false
+    required: [items, do]
+    properties:
+      items: {type: array, items: {type: string}, minItems: 2, maxItems: 2}
+      if: {$ref: "#/$defs/conds"}
+      do: {$ref: "#/$defs/acts"}
+
+  # ---------- state manifest: start state, and every save file ----------
+  state:
+    type: object
+    additionalProperties: false
+    properties:
+      spec_version: {type: string}
+      location: {type: string}
+      mark: {type: string}
+      inventory: {type: array, items: {type: string}}
+      flags: {type: object, additionalProperties: {type: boolean}}       # defaults come from game.flags
+      objects: {type: object, additionalProperties: {type: string}}      # defaults come from each object's state
+      characters:
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties: false
+          properties: {location: {type: string}, mark: {type: string}, state: {type: string}}
+      said: {type: array, items: {type: string}}                        # conversation state, global
+      music: {type: string}                                              # play_music override, "" = room default
+
+  # ---------- one def per file ----------
+  game:            # game.yaml
+    type: object
+    additionalProperties: false
+    required: [spec_version, id, title, player, verbs, start]
+    properties:
+      spec_version: {const: "0.1"}
+      id: {$ref: "#/$defs/id"}
+      title: {type: string}
+      resolution: {$ref: "#/$defs/xy"}
+      lang: {type: string}
+      player: {type: string}
+      verbs: {type: array, items: {type: string}}
+      flags: {type: object, additionalProperties: {type: boolean}}
+      ending: {type: string}
+      start: {$ref: "#/$defs/state"}
+      defaults: {$ref: "#/$defs/lines"}
+      combinations: {type: array, items: {$ref: "#/$defs/combo"}}
+
+  map:             # map.yaml: the single source of truth for exits
+    type: object
+    additionalProperties: false
+    properties:
+      edges:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [id, from, to, spawn]
+          properties: {id: {$ref: "#/$defs/id"}, from: {type: string}, to: {type: string}, spawn: {type: string}}
+
+  location:        # locations/<id>/sheet.yaml
+    type: object
+    additionalProperties: false
+    required: [id, background]
+    properties:
+      id: {$ref: "#/$defs/id"}
+      name: {type: string}
+      background: {type: string}
+      walkway: {type: string}
+      objects_mask: {type: string}
+      depth: {type: string}
+      scale: {$ref: "#/$defs/xy"}          # character scale at depth black (far) and white (near)
+      walkbehinds:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [mask, baseline]
+          properties: {mask: {type: string}, baseline: {type: number}}
+      music: {type: string}
+      marks: {type: object, additionalProperties: {$ref: "#/$defs/xy"}}
+      hotspots:                            # object id -> its colour in the object mask
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties: false
+          required: [color, mark]
+          properties: {color: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}, mark: {type: string}, pos: {$ref: "#/$defs/xy"}}
+      exits:                               # map edge id -> the hotspot that triggers it
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties: false
+          required: [hotspot]
+          properties: {hotspot: {type: string}, state: {type: string}}
+      npcs:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [character, mark]
+          properties: {character: {type: string}, mark: {type: string}, facing: {type: string},
+                       state: {type: string}, if: {$ref: "#/$defs/conds"}}
+      rules: {type: array, items: {$ref: "#/$defs/rule"}}
+
+  object:          # objects/<id>.yaml
+    type: object
+    additionalProperties: false
+    required: [id, state, states]
+    properties:
+      id: {$ref: "#/$defs/id"}
+      name: {type: string}
+      icon: {type: string}                 # objects with an icon can be carried (items)
+      state: {type: string}
+      states: {type: object, additionalProperties: {type: string}}   # state -> sprite ("" = draw nothing)
+      rules: {type: array, items: {$ref: "#/$defs/rule"}}
+      fallback: {$ref: "#/$defs/lines"}
+
+  character:       # characters/<id>.yaml
+    type: object
+    additionalProperties: false
+    required: [id, animations]
+    properties:
+      id: {$ref: "#/$defs/id"}
+      name: {type: string}
+      speed: {type: number}
+      text_color: {type: string}
+      animations:
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties: false
+          required: [sheet]
+          properties: {sheet: {type: string}, cols: {type: integer, minimum: 1},
+                       rows: {type: integer, enum: [1, 8]}, fps: {type: number}}
+      voice:
+        type: object
+        additionalProperties: false
+        properties: {model: {type: string}, ref_wav: {type: string}}
+      rules: {type: array, items: {$ref: "#/$defs/rule"}}
+      fallback: {$ref: "#/$defs/lines"}
+
+  dialogue:        # characters/<id>/dialogue/<global|location>.yaml
+    type: object
+    additionalProperties: false
+    properties:
+      start: {type: string}
+      nodes:
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties: false
+          properties:
+            say: {type: string}
+            do: {$ref: "#/$defs/acts"}
+            goto: {type: string}
+            options:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [line]
+                properties: {line: {type: string}, goto: {type: string}, once: {type: boolean},
+                             if: {$ref: "#/$defs/conds"}}
+
+  strings:         # strings/<lang>.yaml
+    type: object
+    additionalProperties: {type: string}
+
+  # ---------- LLM patch operations (constrained decoding uses this) ----------
+  patch:
+    type: object
+    additionalProperties: false
+    required: [ops]
+    properties:
+      ops:
+        type: array
+        items:
+          oneOf:
+            - {type: object, additionalProperties: false, required: [op, target, rule],
+               properties: {op: {const: add_rule}, target: {type: string}, rule: {$ref: "#/$defs/rule"}}}
+            - {type: object, additionalProperties: false, required: [op, rule],
+               properties: {op: {const: add_combination}, rule: {$ref: "#/$defs/combo"}}}
+            - {type: object, additionalProperties: false, required: [op, flag, value],
+               properties: {op: {const: set_flag_default}, flag: {$ref: "#/$defs/id"}, value: {type: boolean}}}
+            - {type: object, additionalProperties: false, required: [op, edge, hotspot],
+               properties: {op: {const: link_exit}, hotspot: {type: string}, state: {type: string},
+                            edge: {type: object, additionalProperties: false, required: [id, from, to, spawn],
+                                   properties: {id: {type: string}, from: {type: string}, to: {type: string}, spawn: {type: string}}}}}
+            - {type: object, additionalProperties: false, required: [op, id, text],
+               properties: {op: {const: set_string}, id: {type: string}, text: {type: string}, lang: {type: string}}}
+            - {type: object, additionalProperties: false, required: [op, location, mark, pos],
+               properties: {op: {const: add_mark}, location: {type: string}, mark: {$ref: "#/$defs/id"}, pos: {$ref: "#/$defs/xy"}}}
+            - {type: object, additionalProperties: false, required: [op, question, options],
+               properties: {op: {const: ask}, question: {type: string},
+                            options: {type: array, items: {type: string}, minItems: 2, maxItems: 4}}}

@@ -1,0 +1,45 @@
+str_title: The Guard and the Cake
+str_street: Street
+str_house: House
+str_player: Me
+str_guard: Guard
+str_door: Door
+str_key: Key
+str_cake: Cake
+str_house_door: Door
+str_intro: I'm starving. There's a cake in that house, I just know it.
+str_default_look: Nothing special.
+str_default_talk: It doesn't say much.
+str_default_use: That doesn't work.
+str_default_take: I can't take that.
+str_door_look_locked: A sturdy door. Locked.
+str_door_look_open: The door is open. I can smell cake.
+str_door_locked: It's locked.
+str_door_take: It's attached to the house.
+str_door_unlocked: Click. It's open!
+str_guard_not_on_watch: Hey! Not on my watch.
+str_key_look: A small brass key.
+str_key_take: Someone dropped a key.
+str_key_no_fit: The key doesn't fit that.
+str_guard_look: A guard. He looks bored.
+str_guard_no_thanks: No thanks.
+str_guard_hello: Halt! Who goes there?
+str_opt_who: Who are you?
+str_guard_who: I guard this house. And the cat. Mostly the cat.
+str_opt_cat: Isn't that your cat running inside?
+str_guard_cat: Mittens! Not again. Stay right there.
+str_opt_bye: Never mind.
+str_guard_bye: Move along.
+str_guard_inside: Have you seen Mittens? Wait, how did you get in?
+str_opt_cat_where: The cat? Under the table, I think.
+str_guard_no_cat: There's no cat under the table. Hmm.
+str_cake_look: A whole cake. Practically unguarded.
+str_guard_cake: Hey, that's my cake! Oh, fine. Take it.
+str_cake_take: Victory tastes like sponge.
+str_house_door_look: The way back out.
+str_the_end: The End
+verb_walk: Walk to
+verb_look: Look at
+verb_talk: Talk to
+verb_use: Use
+verb_take: Pick up

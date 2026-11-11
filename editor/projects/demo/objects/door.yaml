@@ -1,0 +1,28 @@
+# The door owns "use key on door"; the key's sheet only has its own lines.
+id: door
+name: str_door
+state: locked
+states: {locked: "", open: objects/door/open.png}
+rules:
+  - verb: use
+    with: key
+    if: [{type: flag, flag: guard_left, is: false}]
+    do: [{type: say, who: guard, line: str_guard_not_on_watch}]
+  - verb: use
+    with: key
+    if: [{type: state, object: door, is: locked}]
+    do:
+      - {type: play_sound, file: sfx/creak.wav}
+      - {type: set_state, object: door, state: open}
+      - {type: remove, item: key}
+      - {type: say, line: str_door_unlocked}
+  - verb: walk
+    if: [{type: state, object: door, is: locked}]
+    do: [{type: say, line: str_door_locked}]
+  - verb: look
+    if: [{type: state, object: door, is: locked}]
+    do: [{type: say, line: str_door_look_locked}]
+  - verb: look
+    do: [{type: say, line: str_door_look_open}]
+fallback:
+  take: str_door_take

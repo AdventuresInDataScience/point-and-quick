@@ -1,0 +1,16 @@
+# Used wherever there's no <location>.yaml for this character (or for nodes it doesn't define).
+start: hello
+nodes:
+  hello: {say: str_guard_hello, goto: menu}
+  menu:
+    options:
+      - {line: str_opt_who, goto: who, once: true}
+      - {line: str_opt_cat, goto: cat, if: [{type: said, line: str_guard_who}]}
+      - {line: str_opt_bye, goto: bye}
+  who: {say: str_guard_who, goto: menu}
+  cat:
+    say: str_guard_cat
+    do:
+      - {type: set_flag, flag: guard_left}
+      - {type: move, character: guard, location: house, mark: guard_inside}
+  bye: {say: str_guard_bye}

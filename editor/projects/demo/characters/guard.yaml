@@ -1,0 +1,13 @@
+id: guard
+name: str_guard
+speed: 100
+text_color: "#ffcc66"
+animations:
+  idle: {sheet: characters/guard/idle.png, cols: 1, rows: 8, fps: 1}
+  walk: {sheet: characters/guard/walk.png, cols: 4, rows: 8, fps: 8}
+voice: {model: en_GB-alan-medium.onnx}
+rules:
+  - verb: look
+    do: [{type: say, line: str_guard_look}]
+fallback:
+  use: str_guard_no_thanks

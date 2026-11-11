@@ -1,0 +1,24 @@
+# Global sheet: everything not tied to one place or thing.
+spec_version: "0.1"
+id: demo
+title: str_title
+resolution: [640, 360]
+lang: en
+player: player
+verbs: [walk, look, talk, use, take]
+flags:                      # every flag is declared here with its default
+  guard_left: false
+  game_won: false
+ending: game_won            # the game ends when this flag becomes true
+start:                      # state manifest; flags/objects default from their declarations
+  location: street
+  mark: start
+  inventory: []
+  characters:
+    guard: {location: street, mark: guard_spot, state: idle}
+defaults:                   # said when nothing more specific matches
+  look: str_default_look
+  talk: str_default_talk
+  use: str_default_use
+  take: str_default_take
+combinations: []

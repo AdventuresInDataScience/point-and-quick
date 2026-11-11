@@ -1,0 +1,10 @@
+id: player
+name: str_player
+speed: 140
+text_color: "#ffffff"
+animations:          # rows = 8 facing directions (e, se, s, sw, w, nw, n, ne) or 1 (flipped for west)
+  idle: {sheet: characters/player/idle.png, cols: 1, rows: 8, fps: 1}
+  walk: {sheet: characters/player/walk.png, cols: 4, rows: 8, fps: 8}
+voice: {model: en_US-lessac-medium.onnx}
+rules: []
+fallback: {}

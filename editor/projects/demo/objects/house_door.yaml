@@ -1,0 +1,8 @@
+id: house_door
+name: str_house_door
+state: shut
+states: {shut: ""}
+rules:
+  - verb: look
+    do: [{type: say, line: str_house_door_look}]
+fallback: {}

@@ -1,0 +1,9 @@
+# Lines for when the guard is met in the house; "bye" falls back to global.yaml.
+start: inside
+nodes:
+  inside: {say: str_guard_inside, goto: inside_menu}
+  inside_menu:
+    options:
+      - {line: str_opt_cat_where, goto: no_cat, once: true}
+      - {line: str_opt_bye, goto: bye}
+  no_cat: {say: str_guard_no_cat, goto: inside_menu}

@@ -1,0 +1,4 @@
+# Every location-to-location connection. Location sheets say which hotspot triggers each edge.
+edges:
+  - {id: street_to_house, from: street, to: house, spawn: entry}
+  - {id: house_to_street, from: house, to: street, spawn: door_front}

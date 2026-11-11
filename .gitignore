@@ -1,0 +1,7 @@
+engine/target/
+editor/exports/
+editor/models/
+editor/ai.yaml
+**/.key
+**/__pycache__/
+saves/

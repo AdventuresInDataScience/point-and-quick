@@ -1,0 +1,26 @@
+id: street
+name: str_street
+background: locations/street/bg.png
+walkway: locations/street/walk.png
+objects_mask: locations/street/objects.png
+depth: locations/street/depth.png
+scale: [0.7, 1.0]
+walkbehinds:
+  - {mask: locations/street/behind_lamp.png, baseline: 342}
+music: music/street.wav
+marks:
+  start: [110, 320]
+  door_front: [425, 264]
+  guard_spot: [492, 262]
+  key_spot: [234, 308]
+hotspots:
+  door: {color: "#ff0000", mark: door_front, pos: [400, 170]}
+  key: {color: "#00ff00", mark: key_spot, pos: [248, 299]}
+exits:
+  street_to_house: {hotspot: door, state: open}      # gated by the door's state
+npcs:
+  - {character: guard, mark: guard_spot, facing: left, if: [{type: flag, flag: guard_left, is: false}]}
+rules:
+  - verb: enter
+    if: [{type: said, line: str_intro, is: false}]
+    do: [{type: say, line: str_intro}]

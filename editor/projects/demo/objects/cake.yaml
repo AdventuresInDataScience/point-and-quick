@@ -1,0 +1,19 @@
+id: cake
+name: str_cake
+icon: objects/cake/icon.png
+state: here
+states: {here: objects/cake/table.png, gone: ""}
+rules:
+  - verb: take
+    if: [{type: at, character: guard, location: house}]
+    do:
+      - {type: say, who: guard, line: str_guard_cake}
+      - {type: play_sound, file: sfx/pickup.wav}
+      - {type: give, item: cake}
+      - {type: set_state, object: cake, state: gone}
+      - {type: say, line: str_cake_take}
+      - {type: wait, seconds: 0.5}
+      - {type: set_flag, flag: game_won}
+  - verb: look
+    do: [{type: say, line: str_cake_look}]
+fallback: {}

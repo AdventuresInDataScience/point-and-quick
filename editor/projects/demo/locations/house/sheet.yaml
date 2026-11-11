@@ -1,0 +1,21 @@
+id: house
+name: str_house
+background: locations/house/bg.png
+walkway: locations/house/walk.png
+objects_mask: locations/house/objects.png
+depth: locations/house/depth.png
+scale: [0.8, 1.05]
+walkbehinds: []
+music: music/house.wav
+marks:
+  entry: [112, 300]
+  cake_spot: [300, 292]
+  guard_inside: [500, 300]
+hotspots:
+  house_door: {color: "#0000ff", mark: entry}
+  cake: {color: "#ffff00", mark: cake_spot, pos: [292, 196]}
+exits:
+  house_to_street: {hotspot: house_door}
+npcs:
+  - {character: guard, mark: guard_inside, facing: left}
+rules: []
